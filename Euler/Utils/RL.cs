@@ -68,7 +68,7 @@ using Raylib_cs;
 using Raylib = Raylib_cs.Raylib;
 using Raymath = Raylib_cs.Raymath;
 
-namespace Euler;
+namespace Euler.Utils;
 
 /// <summary>
 /// Pointer-free facade over the parts of the <c>Raylib_cs.Raylib</c> /
@@ -89,7 +89,11 @@ public static class RL
     {
         var result = new T[count];
         if (count > 0)
-            Marshal.Copy((IntPtr)native, new IntPtr(&result[0]), 0, Marshal.SizeOf<T>() * count);
+        {
+            var raw = new byte[count * Marshal.SizeOf<T>()];
+            Marshal.Copy((IntPtr)native, raw, 0, raw.Length);
+            Buffer.BlockCopy(raw, 0, result, 0, raw.Length);
+        }
         return result;
     }
 
@@ -285,26 +289,32 @@ public static class RL
     {
         if (textList == null || textList.Length == 0) return string.Empty;
 
-        var buffers = new Utf8Buffer[textList.Length];
+        var bytes = new byte[textList.Length][];
+        var handles = new GCHandle[textList.Length];
         var pointers = new SByte*[textList.Length];
+        GCHandle listHandle = default;
+        string result = string.Empty;
         try
         {
             for (int i = 0; i < textList.Length; i++)
             {
-                buffers[i] = Utf8StringUtils.ToUtf8Buffer(textList[i] ?? string.Empty);
-                pointers[i] = buffers[i].AsPointer();
+                bytes[i] = Encoding.UTF8.GetBytes(textList[i] ?? string.Empty);
+                handles[i] = GCHandle.Alloc(bytes[i], GCHandleType.Pinned);
+                pointers[i] = (SByte*)handles[i].AddrOfPinnedObject();
             }
 
+            listHandle = GCHandle.Alloc(pointers, GCHandleType.Pinned);
+            SByte** list = (SByte**)listHandle.AddrOfPinnedObject();
+
             using var delim = Utf8StringUtils.ToUtf8Buffer(delimiter ?? string.Empty);
-            fixed (SByte** list = &pointers[0])
-            {
-                return ReadString(Raylib.TextJoin(list, textList.Length, delim.AsPointer()));
-            }
+            result = ReadString(Raylib.TextJoin(list, textList.Length, delim.AsPointer()));
         }
         finally
         {
-            for (int i = 0; i < buffers.Length; i++) buffers[i].Dispose();
+            listHandle.Free();
+            for (int i = 0; i < handles.Length; i++) handles[i].Free();
         }
+        return result;
     }
 
     /// <summary>
@@ -465,9 +475,11 @@ public static class RL
         Encoding.UTF8.GetBytes(text, 0, text.Length, buffer, 0);
 
         using var appendBuf = Utf8StringUtils.ToUtf8Buffer(append);
+        int pos = position;
         fixed (byte* b = buffer)
         {
-            Raylib.TextAppend((SByte*)b, appendBuf.AsPointer(), &position);
+            Raylib.TextAppend((SByte*)b, appendBuf.AsPointer(), &pos);
+            position = pos;
             return ReadString((SByte*)b);
         }
     }
@@ -480,7 +492,10 @@ public static class RL
     public static unsafe int GetCodepointNext(string text, ref int codepointSize)
     {
         using var buffer = Utf8StringUtils.ToUtf8Buffer(text);
-        return Raylib.GetCodepointNext(buffer.AsPointer(), &codepointSize);
+        int size = codepointSize;
+        int codepoint = Raylib.GetCodepointNext(buffer.AsPointer(), &size);
+        codepointSize = size;
+        return codepoint;
     }
 
     /// <summary>
@@ -492,7 +507,10 @@ public static class RL
     public static unsafe int GetCodepointPrevious(string text, ref int codepointSize)
     {
         using var buffer = Utf8StringUtils.ToUtf8Buffer(text);
-        return Raylib.GetCodepointPrevious(buffer.AsPointer(), &codepointSize);
+        int size = codepointSize;
+        int codepoint = Raylib.GetCodepointPrevious(buffer.AsPointer(), &size);
+        codepointSize = size;
+        return codepoint;
     }
 
     /// <summary>
@@ -532,13 +550,15 @@ public static class RL
     /// </summary>
     public static unsafe Color[] LoadImagePalette(Image image, int maxPaletteSize, ref int colorCount)
     {
-        Color* colors = Raylib.LoadImagePalette(image, maxPaletteSize, &colorCount);
-        if (colors == null || colorCount <= 0)
+        int count = colorCount;
+        Color* colors = Raylib.LoadImagePalette(image, maxPaletteSize, &count);
+        colorCount = count;
+        if (colors == null || count <= 0)
         {
             colorCount = 0;
             return Array.Empty<Color>();
         }
-        var result = CopyArray(colors, colorCount);
+        var result = CopyArray(colors, count);
         Raylib.UnloadImagePalette(colors);
         return result;
     }
@@ -692,7 +712,7 @@ public static class RL
         float* samples = Raylib.LoadWaveSamples(wave);
         if (samples == null) return Array.Empty<float>();
         var result = new float[wave.FrameCount];
-        Marshal.Copy((IntPtr)samples, new IntPtr(&result[0]), 0, result.Length * sizeof(float));
+        Marshal.Copy((IntPtr)samples, result, 0, result.Length);
         Raylib.UnloadWaveSamples(samples);
         return result;
     }
@@ -749,12 +769,10 @@ public static class RL
         Vector3 t = default;
         Quaternion r = default;
         Vector3 s = default;
-        fixed (Vector3* tp = &t)
-        fixed (Quaternion* rp = &r)
-        fixed (Vector3* sp = &s)
-        {
-            Raymath.MatrixDecompose(mat, tp, rp, sp);
-        }
+        Vector3* tp = &t;
+        Quaternion* rp = &r;
+        Vector3* sp = &s;
+        Raymath.MatrixDecompose(mat, tp, rp, sp);
         translation = t;
         rotation = r;
         scale = s;
@@ -767,11 +785,9 @@ public static class RL
     {
         Vector3 a = default;
         float ang = 0f;
-        fixed (Vector3* ap = &a)
-        fixed (float* angp = &ang)
-        {
-            Raymath.QuaternionToAxisAngle(q, ap, angp);
-        }
+        Vector3* ap = &a;
+        float* angp = &ang;
+        Raymath.QuaternionToAxisAngle(q, ap, angp);
         axis = a;
         angle = ang;
     }
