@@ -8,7 +8,7 @@ public class TestScene : Scene
 {
     public TestScene(string name) : base(name) { }
 
-    Vector2 testPos = new Vector2(0, 0);
+    Vector2 testPos = new Vector2(Engine.ScreenWidth / 2f, Engine.ScreenHeight / 2f);
     
     public override void Start()
     {

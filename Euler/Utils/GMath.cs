@@ -1,6 +1,6 @@
 using System.Numerics;
 
-namespace DIBBLES.Utils;
+namespace Euler.Utils;
 
 // Helper class for math functions
 public static class GMath

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Euler.Scenes;
 using Euler.Utils;
 using Raylib_cs;
 
@@ -21,6 +22,8 @@ public class Engine
     private Stopwatch timer = new();
     private long previousTicks;
     
+    
+    
     public void Initialize()
     {
         // Init
@@ -29,11 +32,16 @@ public class Engine
         
         Console.WriteLine("Initializing...");
         
+        GMath.Init();
+        
         Raylib.InitWindow(ScreenWidth, ScreenHeight, "Euler Game Engine");
         Raylib.SetExitKey(KeyboardKey.Null);
         Raylib.SetTargetFPS(0); // Do our own spin-wait
         
         Console.WriteLine("Window initialized.");
+        
+        // --- INITIALIZE SCENES HERE ---
+        var testScene = new TestScene("TestScene");
         
         // Start
         foreach (Scene scene in Scenes.Values)
@@ -75,7 +83,7 @@ public class Engine
         Console.WriteLine("Exiting...");
         Exit();
     }
-
+    
     public void Update()
     {
         foreach (Scene scene in Scenes.Values)
