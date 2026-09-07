@@ -12,7 +12,7 @@ public class Engine
     public const int FPS = 165;
     public const float FrameTimestep = 1.0f / (float)FPS;
     
-    public static Engine Instance { get; private set; }
+    public static Engine Instance { get; private set; } = null!;
     
     public static bool IsRunning;
     public static bool IsPaused;
@@ -21,8 +21,6 @@ public class Engine
     
     private Stopwatch timer = new();
     private long previousTicks;
-    
-    
     
     public void Initialize()
     {
@@ -39,6 +37,8 @@ public class Engine
         Raylib.SetTargetFPS(0); // Do our own spin-wait
         
         Console.WriteLine("Window initialized.");
+        
+        timer.Start();
         
         // --- INITIALIZE SCENES HERE ---
         var testScene = new TestScene("TestScene");

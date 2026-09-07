@@ -7,8 +7,6 @@ namespace Euler.Scenes;
 public class TestScene : Scene
 {
     public TestScene(string name) : base(name) { }
-
-    Vector2 testPos = new Vector2(Engine.ScreenWidth / 2f, Engine.ScreenHeight / 2f);
     
     public override void Start()
     {
@@ -17,16 +15,13 @@ public class TestScene : Scene
 
     public override void Update()
     {
-        if (Raylib.IsKeyDown(KeyboardKey.W))
-            testPos += new Vector2(0, 1);
+        
     }
 
     public override void Draw()
     {
         Raylib.BeginDrawing();
         Raylib.ClearBackground(Color.Black);
-        
-        Raylib.DrawCircleV(testPos, 10, Color.Red);
         
         Raylib.EndDrawing();
     }
