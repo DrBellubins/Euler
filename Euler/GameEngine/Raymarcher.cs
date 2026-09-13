@@ -68,8 +68,8 @@ public class Raymarcher
         for (int i = 0; i < _planeCount; i++)
             _planes[i].WriteInto(_planeData, i);
 
-        if (_dbgFrames++ < 2)
-            Console.WriteLine($"DEBUG C# focal={1f / MathF.Tan(GMath.ToRadians(camera.FovY) * 0.5f)} fovY={camera.FovY} camPos={camera.Position} planeY={_planeData[1]} planeData0..3=[{_planeData[0]},{_planeData[1]},{_planeData[2]},{_planeData[3]}]");
+        if (_dbgFrames++ == 5)
+            Raylib.TakeScreenshot("rowdump.png");
 
         Raylib.BeginShaderMode(_shader);
 
