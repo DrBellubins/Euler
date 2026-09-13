@@ -76,6 +76,7 @@ public class Engine
 
             previousTicks = afterWait; // Update to the end of the frame
             
+            Input.Update();
             Update();
             Draw();
         }

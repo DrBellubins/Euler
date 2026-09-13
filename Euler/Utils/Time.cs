@@ -16,4 +16,6 @@ public class Time
         }
         set{ deltaTime = value; }
     }
+    
+    public static float DeltaTimeF => (float)DeltaTime;
 }
