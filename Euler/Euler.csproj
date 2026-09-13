@@ -21,4 +21,9 @@
       <PackageReference Include="Raylib-cs" Version="8.1.0" />
     </ItemGroup>
 
+    <ItemGroup>
+      <!-- Ship runtime assets (textures, etc.) next to the built app. -->
+      <None Include="Assets\**" CopyToOutputDirectory="PreserveNewest" />
+    </ItemGroup>
+
 </Project>
