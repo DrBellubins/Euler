@@ -1,46 +1,12 @@
-namespace Euler.GameEngine;
-
-/// <summary>
-/// Embedded shader sources for the full-screen raymarcher. Kept as C#
-/// constants so the engine has no runtime shader-file dependency
-/// (AOT / native-publish friendly).
-///
-/// NOTE: raylib 6.0 compiles custom shader code verbatim - it does NOT
-/// inject attribute/uniform declarations or define VERTEX/FRAGMENT macros
-/// (the old 5.x "#if defined(VERTEX)" single-file convention no longer
-/// works). Shaders must be complete, versioned sources, per the
-/// examples/shaders/resources/shaders/glsl100/*.vs|*.fs convention.
-/// </summary>
-public static class Shaders
-{
-    /// <summary>
-    /// Vertex stage: maps the full-screen quad through raylib's 2D mvp.
-    /// Nothing else - all work happens in the fragment stage.
-    /// </summary>
-    public const string RaymarcherVertexSource = """
-#version 330
-
-in vec3 vertexPosition;
-uniform mat4 mvp;
-
-void main()
-{
-    gl_Position = mvp * vec4(vertexPosition, 1.0);
-}
-""";
-
-    /// <summary>
-    /// Fragment stage: computes one ray per pixel, intersects all plane
-    /// primitives analytically and shades the closest hit with a tiled
-    /// texture (plus sky + distance fog on misses).
-    ///
-    /// Per-plane uniform data lives in PlaneData (3 vec4 per plane):
-    ///   [0] origin.xyz, size
-    ///   [1] normal.xyz, textureIndex
-    ///   [2] uvScale.xy, 0, 0
-    /// See PlanePrimitive.WriteInto for the C# side.
-    /// </summary>
-    public const string RaymarcherFragmentSource = """
+// Fragment stage: computes one ray per pixel, intersects all plane
+// primitives analytically and shades the closest hit with a tiled
+// texture (plus sky + distance fog on misses).
+//
+// Per-plane uniform data lives in PlaneData (3 vec4 per plane):
+//   [0] origin.xyz, size
+//   [1] normal.xyz, textureIndex
+//   [2] uvScale.xy, 0, 0
+// See PlanePrimitive.WriteInto for the C# side.
 #version 330
 
 out vec4 fragColor;
@@ -134,6 +100,4 @@ void main()
     }
 
     fragColor = vec4(color, 1.0);
-}
-""";
 }

@@ -14,6 +14,9 @@ public class Raymarcher
 {
     public const int MaxPlanes = 8;
 
+    private const string VertexShaderPath = "Assets/Shaders/Raymarcher.vs";
+    private const string FragmentShaderPath = "Assets/Shaders/Raymarcher.fs";
+
     private readonly Shader _shader;
     private readonly Texture2D _planeTex;
     private readonly Texture2D _quadTex;   // 1x1 white, only exists to fill the screen
@@ -32,7 +35,7 @@ public class Raymarcher
     {
         _planeTex = planeTexture;
 
-        _shader = Raylib.LoadShaderFromMemory(Shaders.RaymarcherVertexSource, Shaders.RaymarcherFragmentSource);
+        _shader = Raylib.LoadShader(ResolveAsset(VertexShaderPath), ResolveAsset(FragmentShaderPath));
         if (!Raylib.IsShaderValid(_shader))
             throw new InvalidOperationException("Raymarcher shader failed to compile/load.");
 
@@ -88,6 +91,17 @@ public class Raymarcher
         Raylib.UnloadShader(_shader);
         Raylib.UnloadTexture(_planeTex);
         Raylib.UnloadTexture(_quadTex);
+    }
+
+    /// <summary>
+    /// Resolves a relative asset path against the executable directory
+    /// (works with <c>dotnet run</c> and published builds), falling back to
+    /// the path as-is (Rider sets CWD to the output dir).
+    /// </summary>
+    private static string ResolveAsset(string relativePath)
+    {
+        string appDirPath = System.IO.Path.Combine(AppContext.BaseDirectory, relativePath);
+        return Raylib.FileExists(appDirPath) ? appDirPath : relativePath;
     }
 
     /// <summary>

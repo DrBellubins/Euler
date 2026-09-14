@@ -23,7 +23,7 @@ public class Freecam
         Camera.Up = Vector3.UnitY;
         Camera.FovY = 90f;
         Camera.Projection = CameraProjection.Perspective;
-
+        
         Input.CursorLocked = true;
     }
 
