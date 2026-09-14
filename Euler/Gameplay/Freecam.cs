@@ -38,7 +38,7 @@ public class Freecam
         if (Input.CursorLocked)
         {
             Vector2 look = Input.LookDelta;
-            _yaw   -= look.X * LookSensitivity;
+            _yaw   += look.X * LookSensitivity;
             _pitch  = GMath.Clamp(_pitch - look.Y * LookSensitivity, -MaxPitch, MaxPitch);
         }
 
@@ -57,8 +57,8 @@ public class Freecam
         // Move along the CAMERA's own axes, not the world axes.
         if (Input.MoveForward())  Camera.Position += forward * (MoveSpeed * dt);
         if (Input.MoveBackward()) Camera.Position -= forward * (MoveSpeed * dt);
-        if (Input.MoveLeft())     Camera.Position += right * (MoveSpeed * dt);
-        if (Input.MoveRight())    Camera.Position -= right * (MoveSpeed * dt);
+        if (Input.MoveLeft())     Camera.Position -= right * (MoveSpeed * dt);
+        if (Input.MoveRight())    Camera.Position += right * (MoveSpeed * dt);
 
         // Optional vertical fly (Space = up, Ctrl = down).
         if (Input.Jump())   Camera.Position += Camera.Up * (MoveSpeed * dt);

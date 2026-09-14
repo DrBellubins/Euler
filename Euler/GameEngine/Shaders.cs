@@ -97,40 +97,7 @@ vec3 SkyColor(vec3 rd)
     return mix(vec3(0.78, 0.87, 1.0), vec3(0.28, 0.47, 0.78), h);
 }
 
-// rows 0..15   = CamToWorld elements 0..15 (column-major, row-major read)
-// rows 16..27  = PlaneData floats 0..11
-// rows 28..30  = Focal, Resolution.x/1600, Resolution.y/900
 void main()
-{
-    int row = int(gl_FragCoord.y - 1.0);
-    float v = 0.0;
-    if (row >= 0 && row < 16) {
-        float e = 0.0;
-        if (row == 0) e = CamToWorld[0].x; else if (row == 1) e = CamToWorld[0].y;
-        else if (row == 2) e = CamToWorld[0].z; else if (row == 3) e = CamToWorld[0].w;
-        else if (row == 4) e = CamToWorld[1].x; else if (row == 5) e = CamToWorld[1].y;
-        else if (row == 6) e = CamToWorld[1].z; else if (row == 7) e = CamToWorld[1].w;
-        else if (row == 8) e = CamToWorld[2].x; else if (row == 9) e = CamToWorld[2].y;
-        else if (row == 10) e = CamToWorld[2].z; else if (row == 11) e = CamToWorld[2].w;
-        else if (row == 12) e = CamToWorld[3].x; else if (row == 13) e = CamToWorld[3].y;
-        else e = CamToWorld[3].w - 1.0;                   // skip the 1.0
-        v = e;
-    } else if (row >= 16 && row < 28) {
-        float f = 0.0;
-        if (row == 16) f = PlaneData[0].x; else if (row == 17) f = PlaneData[0].y;
-        else if (row == 18) f = PlaneData[0].z; else if (row == 19) f = PlaneData[0].w;
-        else if (row == 20) f = PlaneData[1].x; else if (row == 21) f = PlaneData[1].y;
-        else if (row == 22) f = PlaneData[1].z; else if (row == 23) f = PlaneData[1].w;
-        else if (row == 24) f = PlaneData[2].x; else if (row == 25) f = PlaneData[2].y;
-        v = f;
-    } else if (row == 28) v = Focal;
-    else if (row == 29) v = Resolution.x / 1600.0;
-    else if (row == 30) v = Resolution.y / 900.0;
-    fragColor = vec4(clamp(v * 0.1 + 0.5, 0.0, 1.0), 0.0, 0.0, 1.0);
-    return;
-}
-
-void RealMain()
 {
     // Pixel center in normalized device coords (y up, -1..1, x aspect-corrected).
     vec2 ndc = (2.0 * gl_FragCoord.xy - Resolution) / Resolution.y;

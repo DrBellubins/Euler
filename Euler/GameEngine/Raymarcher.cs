@@ -43,9 +43,6 @@ public class Raymarcher
         _locPlaneData  = Raylib.GetShaderLocation(_shader, "PlaneData");
         _locPlaneTex   = Raylib.GetShaderLocation(_shader, "PlaneTex");
 
-        // TEMP-DEBUG
-        Console.WriteLine($"DEBUG locs: Resolution={_locResolution} CamToWorld={_locCamToWorld} Focal={_locFocal} PlaneCount={_locPlaneCount} PlaneData={_locPlaneData} PlaneTex={_locPlaneTex}");
-
         // A single white pixel is all the full-screen quad needs.
         Image img = Raylib.GenImageColor(1, 1, Color.White);
         _quadTex = Raylib.LoadTextureFromImage(img);
@@ -61,15 +58,10 @@ public class Raymarcher
     }
 
     /// <summary>Draws the raymarched scene for <paramref name="camera"/> (fills the whole window).</summary>
-    private int _dbgFrames;
-
     public void Draw(Camera3D camera)
     {
         for (int i = 0; i < _planeCount; i++)
             _planes[i].WriteInto(_planeData, i);
-
-        if (_dbgFrames++ == 5)
-            Raylib.TakeScreenshot("rowdump.png");
 
         Raylib.BeginShaderMode(_shader);
 
@@ -99,10 +91,9 @@ public class Raymarcher
     }
 
     /// <summary>
-    /// Builds the camera-to-world matrix (column-major) from the camera's
-    /// position/orientation: x = right, y = true-up, z = -forward, and uploads
-    /// it. A mat4 uniform is a vec4 array of 4 columns, so it goes through
-    /// <c>SetShaderValueV</c> with count 4.
+    /// Builds the camera-to-world matrix from the camera's
+    /// position/orientation (x = right, y = true-up, z = -forward) and uploads
+    /// it.
     /// </summary>
     private void SetCameraMatrix(Camera3D camera)
     {
@@ -110,17 +101,19 @@ public class Raymarcher
         Vector3 right   = Vector3.Normalize(Vector3.Cross(camera.Up, forward));
         Vector3 up      = Vector3.Cross(forward, right);
 
-        Span<float> m = stackalloc float[16]
-        {
-            right.X,    right.Y,    right.Z,    0f,
-            up.X,       up.Y,       up.Z,       0f,
-            -forward.X, -forward.Y, -forward.Z, 0f,
-            camera.Position.X, camera.Position.Y, camera.Position.Z, 1f
-        };
-
-        if (_dbgFrames < 2)
-            Console.WriteLine($"DEBUG C# mat col3=[{m[12]},{m[13]},{m[14]},{m[15]}] col0=[{m[0]},{m[1]},{m[2]}]");
-
-        Raylib.SetShaderValueV(_shader, _locCamToWorld, m, ShaderUniformDataType.Vec4, 4);
+        // Uploaded via SetShaderValueMatrix (glUniformMatrix4fv), NOT via
+        // SetShaderValueV(..., Vec4, 4): that path calls glUniform4fv(loc, 4,
+        // ...), which Mesa 26.x (llvmpipe) rejects with INVALID_OPERATION when
+        // the target is a mat4 - the write is silently dropped and the uniform
+        // stays at its initial zero matrix (degenerate rays -> flat sky).
+        // SetShaderValueMatrix lands correctly; the constructor layout below
+        // (intended columns as Matrix4x4 columns) was verified against the
+        // on-screen uniform row-dump.
+        var mat = new Matrix4x4(
+            right.X, up.X, -forward.X, camera.Position.X,
+            right.Y, up.Y, -forward.Y, camera.Position.Y,
+            right.Z, up.Z, -forward.Z, camera.Position.Z,
+            0f, 0f, 0f, 1f);
+        Raylib.SetShaderValueMatrix(_shader, _locCamToWorld, mat);
     }
 }
