@@ -7,15 +7,15 @@ namespace Euler.Gameplay;
 
 public class Freecam
 {
+    public const float SlowSpeed = 5f;
+    public const float FastSpeed = 15f;
+    public const float LookSensitivity = 0.0022f;
+    public const float MaxPitch = 89.0f;
+    
     public Camera3D Camera = new();
-
-    // Free-cam orientation, in radians. Yaw = turn left/right, pitch = look up/down.
-    private float _yaw;
-    private float _pitch;
-
-    private const float MoveSpeed = 10f;        // world units per second
-    private const float LookSensitivity = 0.0022f; // radians per pixel
-    private const float MaxPitch = 1.55f;       // ~89 deg, avoids gimbal flip at the poles
+    
+    private float yaw;
+    private float pitch;
 
     public void Start()
     {
@@ -24,48 +24,48 @@ public class Freecam
         Camera.FovY = 90f;
         Camera.Projection = CameraProjection.Perspective;
 
-        // Start in mouse-look (free-cam) mode. Tab toggles it.
         Input.CursorLocked = true;
     }
 
     public void Update()
     {
-        // Tab toggles the captured cursor / mouse-look on and off.
         if (Input.FlyToggle())
             Input.CursorLocked = !Input.CursorLocked;
 
-        // Mouse look — only while the cursor is captured.
         if (Input.CursorLocked)
         {
             Vector2 look = Input.LookDelta;
-            _yaw   += look.X * LookSensitivity;
-            _pitch  = GMath.Clamp(_pitch - look.Y * LookSensitivity, -MaxPitch, MaxPitch);
+            
+            yaw += look.X * LookSensitivity;
+            
+            pitch = GMath.Clamp(pitch - look.Y * LookSensitivity,
+                -GMath.ToRadians(MaxPitch), GMath.ToRadians(MaxPitch));
         }
 
-        // Derive a normalized forward vector from yaw/pitch.
-        // At yaw=0, pitch=0 this is +Z, matching the original "look at the cube from -10".
         Vector3 forward = new(
-            MathF.Sin(_yaw) * MathF.Cos(_pitch),
-            MathF.Sin(_pitch),
-            MathF.Cos(_yaw) * MathF.Cos(_pitch));
+            MathF.Sin(yaw) * MathF.Cos(pitch),
+            MathF.Sin(pitch),
+            MathF.Cos(yaw) * MathF.Cos(pitch));
 
-        // Camera's right vector (perpendicular to forward, in the horizontal plane).
         Vector3 right = Vector3.Normalize(Vector3.Cross(Camera.Up, forward));
 
         float dt = Time.DeltaTimeF;
 
-        // Move along the CAMERA's own axes, not the world axes.
-        if (Input.MoveForward())  Camera.Position += forward * (MoveSpeed * dt);
-        if (Input.MoveBackward()) Camera.Position -= forward * (MoveSpeed * dt);
-        if (Input.MoveLeft())     Camera.Position -= right * (MoveSpeed * dt);
-        if (Input.MoveRight())    Camera.Position += right * (MoveSpeed * dt);
+        float currentSpeed;
 
-        // Optional vertical fly (Space = up, Ctrl = down).
-        if (Input.Jump())   Camera.Position += Camera.Up * (MoveSpeed * dt);
-        if (Input.Crouch()) Camera.Position -= Camera.Up * (MoveSpeed * dt);
+        if (Input.Run())
+            currentSpeed = FastSpeed;
+        else
+            currentSpeed = SlowSpeed;
+        
+        if (Input.MoveForward()) Camera.Position += forward * (currentSpeed * dt);
+        if (Input.MoveBackward()) Camera.Position -= forward * (currentSpeed * dt);
+        if (Input.MoveLeft()) Camera.Position -= right * (currentSpeed * dt);
+        if (Input.MoveRight()) Camera.Position += right * (currentSpeed * dt);
 
-        // THE key line: keep the camera aimed along its own forward direction
-        // instead of letting the target stay pinned to the origin.
+        if (Input.Jump()) Camera.Position += Camera.Up * (currentSpeed * dt);
+        if (Input.Crouch()) Camera.Position -= Camera.Up * (currentSpeed * dt);
+
         Camera.Target = Camera.Position + forward;
     }
 }
