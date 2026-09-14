@@ -9,6 +9,8 @@
 // See PlanePrimitive.WriteInto for the C# side.
 #version 330
 
+#include "RaymarcherHelpers.inc"
+
 out vec4 fragColor;
 
 #define MAX_PLANES 8
@@ -55,12 +57,6 @@ float IntersectPlane(vec3 ro, vec3 rd, int i, out vec2 uv)
 
     uv = local * c.xy;                                // <- UV tiling
     return t;
-}
-
-vec3 SkyColor(vec3 rd)
-{
-    float h = clamp(rd.y * 0.5 + 0.5, 0.0, 1.0);
-    return mix(vec3(0.78, 0.87, 1.0), vec3(0.28, 0.47, 0.78), h);
 }
 
 void main()

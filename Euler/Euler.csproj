@@ -26,4 +26,29 @@
       <None Include="Assets\**" CopyToOutputDirectory="PreserveNewest" />
     </ItemGroup>
 
+    <!-- The Raylib-cs 8.1.0 NuGet package ships an OpenGL 3.3 libraylib.so. This
+         overwrites it with the locally built GRAPHICS_API_OPENGL_43 library so
+         compute shaders (glDispatchCompute) work. Rebuild it with:
+         ./Euler/native/build-raylib-linux.sh -->
+    <Target Name="DeployCustomRaylibLinux" AfterTargets="CopyFilesToOutputDirectory"
+            Condition="Exists('$(MSBuildProjectDirectory)/native/linux-x64/libraylib.so')">
+      <MakeDir Directories="$(OutDir)runtimes/linux-x64/native" />
+      <Copy SourceFiles="$(MSBuildProjectDirectory)/native/linux-x64/libraylib.so"
+            DestinationFolder="$(OutDir)runtimes/linux-x64/native"
+            OverwriteReadOnlyFiles="true" />
+    </Target>
+
+    <!-- Same for publish output: replace the NuGet-shipped libraylib.so where it
+         lands (root or runtimes/linux-x64/native). -->
+    <Target Name="DeployCustomRaylibLinuxPublish" AfterTargets="Publish"
+            Condition="Exists('$(MSBuildProjectDirectory)/native/linux-x64/libraylib.so') and Exists('$(PublishDir)')">
+      <ItemGroup>
+        <_ShippedRaylibLib Include="$(PublishDir)**/libraylib.so*" />
+      </ItemGroup>
+      <Delete Files="@(_ShippedRaylibLib)" />
+      <Copy SourceFiles="$(MSBuildProjectDirectory)/native/linux-x64/libraylib.so"
+            DestinationFiles="@(_ShippedRaylibLib)"
+            OverwriteReadOnlyFiles="true" />
+    </Target>
+
 </Project>

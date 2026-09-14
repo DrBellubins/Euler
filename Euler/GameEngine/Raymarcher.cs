@@ -1,6 +1,8 @@
 using System.Numerics;
 using Euler.Utils;
 using Raylib_cs;
+// Raylib_cs has its own ShaderType (GL stage enum) - alias the engine's.
+using ShaderType = Euler.Utils.ShaderType;
 
 namespace Euler.GameEngine;
 
@@ -14,7 +16,6 @@ public class Raymarcher
 {
     public const int MaxPlanes = 8;
 
-    private const string VertexShaderPath = "Assets/Shaders/Raymarcher.vs";
     private const string FragmentShaderPath = "Assets/Shaders/Raymarcher.fs";
 
     private readonly Shader _shader;
@@ -35,9 +36,11 @@ public class Raymarcher
     {
         _planeTex = planeTexture;
 
-        _shader = Raylib.LoadShader(ResolveAsset(VertexShaderPath), ResolveAsset(FragmentShaderPath));
-        if (!Raylib.IsShaderValid(_shader))
-            throw new InvalidOperationException("Raymarcher shader failed to compile/load.");
+        // The fragment stage does all the work and is loaded through
+        // Resource (with #include preprocessing). The vertex stage is
+        // raylib's built-in default (mvp * vertexPosition) - identical to the
+        // old Raymarcher.vs, so it is no longer loaded explicitly.
+        _shader = Resource.LoadShader(FragmentShaderPath, ShaderType.Pixel);
 
         _locResolution = Raylib.GetShaderLocation(_shader, "Resolution");
         _locCamToWorld = Raylib.GetShaderLocation(_shader, "CamToWorld");
@@ -91,17 +94,6 @@ public class Raymarcher
         Raylib.UnloadShader(_shader);
         Raylib.UnloadTexture(_planeTex);
         Raylib.UnloadTexture(_quadTex);
-    }
-
-    /// <summary>
-    /// Resolves a relative asset path against the executable directory
-    /// (works with <c>dotnet run</c> and published builds), falling back to
-    /// the path as-is (Rider sets CWD to the output dir).
-    /// </summary>
-    private static string ResolveAsset(string relativePath)
-    {
-        string appDirPath = System.IO.Path.Combine(AppContext.BaseDirectory, relativePath);
-        return Raylib.FileExists(appDirPath) ? appDirPath : relativePath;
     }
 
     /// <summary>

@@ -30,6 +30,7 @@
 //   Fonts      : LoadFontData (+ handle), UnloadFontData, ExportFontAsCode
 //   Audio      : LoadWaveSamples
 //   Models     : LoadMaterials
+//   Shaders    : LoadShaderFromMemory
 //   Window     : GetWindowHandle
 //   Raymath    : MatrixDecompose, QuaternionToAxisAngle, Vector3OrthoNormalize
 //
@@ -740,6 +741,42 @@ public static class RL
         var result = CopyArray(materials, count);
         Raylib.MemFree((void*)materials);
         return result;
+    }
+
+    // -------------------------------------------------------------------
+    // Shaders
+    // -------------------------------------------------------------------
+
+    /// <summary>
+    /// Pointer-free <c>Raylib.LoadShaderFromMemory</c>. A <c>null</c> stage is
+    /// passed as a real NULL, which tells raylib 6.0 to link that stage with
+    /// its built-in default shader (default VS: <c>mvp * vertexPosition</c>;
+    /// default FS: textured-quad shading). NOTE: an empty string is NOT null -
+    /// it will fail to compile, so pass <c>null</c> for stages you don't have.
+    /// The returned Shader is a native object; release it with
+    /// <c>Raylib.UnloadShader</c>.
+    /// </summary>
+    public static unsafe Shader LoadShaderFromMemory(string? vertexCode, string? fragmentCode)
+    {
+        IntPtr vsMem = IntPtr.Zero;
+        IntPtr fsMem = IntPtr.Zero;
+        try
+        {
+            if (vertexCode != null) vsMem = Marshal.StringToCoTaskMemUTF8(vertexCode);
+            if (fragmentCode != null) fsMem = Marshal.StringToCoTaskMemUTF8(fragmentCode);
+
+            sbyte* vsPtr = null;
+            sbyte* fsPtr = null;
+            if (vsMem != IntPtr.Zero) vsPtr = (sbyte*)vsMem.ToPointer();
+            if (fsMem != IntPtr.Zero) fsPtr = (sbyte*)fsMem.ToPointer();
+
+            return Raylib.LoadShaderFromMemory(vsPtr, fsPtr);
+        }
+        finally
+        {
+            if (vsMem != IntPtr.Zero) Marshal.ZeroFreeCoTaskMemUTF8(vsMem);
+            if (fsMem != IntPtr.Zero) Marshal.ZeroFreeCoTaskMemUTF8(fsMem);
+        }
     }
 
     // -------------------------------------------------------------------

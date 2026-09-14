@@ -1,6 +1,9 @@
 bin/
 obj/
 
+# raylib C source tree, cloned by Euler/native/build-raylib-linux.sh
+/lib/
+
 .pi/
 .idea/
 
