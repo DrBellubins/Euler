@@ -33,7 +33,7 @@ public class TestScene : Scene
     
     private static Texture2D LoadGroundTexture()
     {
-        string appDirPath = System.IO.Path.Combine(AppContext.BaseDirectory, TexturePath);
+        string appDirPath = Path.Combine(AppContext.BaseDirectory, TexturePath);
         string path = Raylib.FileExists(appDirPath) ? appDirPath : TexturePath;
 
         Texture2D tex = Raylib.FileExists(path)
@@ -52,6 +52,9 @@ public class TestScene : Scene
         
         raymarcher.Draw(freecam.Camera);
 
+        Raylib.DrawText($"Current speed mult: {freecam.CurrentSpeedMultiplier}",
+            0, 0, 24, Color.White);
+        
         Raylib.EndDrawing();
     }
 }
