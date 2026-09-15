@@ -142,9 +142,19 @@ float IntersectTerrain(vec3 ro, vec3 rd, out vec2 uv)
 {
     uv = vec2(0.0);
 
-    // The heightfield is a single upward-facing surface spanning all xz:
-    // only rays heading below the horizon can hit it.
-    if (rd.y >= -1e-4) return -1.0;
+    // A heightfield has PEAKS, so a ray can hit the surface from ANY
+    // direction: when the camera sits below a peak's summit, the part of
+    // that peak above the camera's horizon is only reachable by rays with
+    // rd.y > 0. Culling those directions clipped the terrain exactly along
+    // the world plane y = ro.y - a "cutoff at the horizon" that stayed fixed
+    // in place while looking the camera around.
+    //
+    // The only rays guaranteed to miss are horizontal/upward ones that
+    // start at or above the terrain's global maximum (Offset.y + Amplitude;
+    // the true max is slightly lower because Fbm < 1 and HillShape < 1):
+    // such a ray can only rise, so it can never cross the surface.
+    if (rd.y >= 0.0 && ro.y >= TerrainData[0].y + TerrainData[1].x)
+        return -1.0;
 
     // Camera at/below the surface: a heightfield has no interior, so the
     // marched distance would be inconsistent - report a miss (the scene

@@ -24,7 +24,7 @@ public class TestScene : Scene
         // stays available for future scenes via AddPlane).
         raymarcher.AddTerrain(new TerrainPrimitive(
             offset: new Vector3(0, -4, 0),
-            amplitude: 7.5f,   // peaks reach y = -0.5, below the camera's start height (0)
+            amplitude: 7.5f,   // theoretical peak tops reach y ~= +3.5 (-4 + 7.5): the camera can dip below a peak
             frequency: 0.04f,
             octaves: 5,
             uvScale: new Vector2(0.5f, 0.5f),
