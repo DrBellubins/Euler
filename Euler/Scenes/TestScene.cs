@@ -18,12 +18,18 @@ public class TestScene : Scene
     public override void Start()
     {
         freecam.Start();
-        raymarcher = new Raymarcher(LoadGroundTexture());
-        
-        raymarcher.AddPlane(new PlanePrimitive(
-            origin: new Vector3(0, -2, 0),
-            normal: Vector3.UnitY,
-            uvScale: new Vector2(1, 1)));
+        raymarcher = new Raymarcher(LoadGroundTexture(), LoadGroundTexture());
+
+        // The scene's ground is the raymarched FBM terrain (the plane family
+        // stays available for future scenes via AddPlane).
+        raymarcher.AddTerrain(new TerrainPrimitive(
+            offset: new Vector3(0, -4, 0),
+            amplitude: 3.5f,   // peaks reach y = -0.5, below the camera's start height (0)
+            frequency: 0.04f,
+            octaves: 5,
+            uvScale: new Vector2(0.5f, 0.5f),
+            sunDirection: new Vector3(0.5f, 1.0f, 0.3f),
+            sunIntensity: 0.8f));
     }
 
     public override void Update()

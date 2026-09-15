@@ -13,12 +13,14 @@
 // and follow the contract documented in Raymarcher/Shapes/Plane.inc:
 //
 //     #include "Raymarcher/Shapes/Plane.inc"   plane shape family
+//     #include "Raymarcher/Shapes/Terrain.inc" infinite FBM heightfield terrain
 //     #include "Raymarcher/Sky.inc"            sky / horizon atmosphere
 //
 // ADDING A FEATURE (the include contract):
-//   - Shape family: add Raymarcher/Shapes/<Name>.inc declaring its data,
-//     uniforms, Intersect<Name>(...) and Shade<Name>(...), then extend
-//     IntersectScene() to race it against the other families.
+//   - Shape family: add Raymarcher/Shapes/<Name>.inc declaring its family ID
+//     (const int Family<Name> = N; - next free number), its data, uniforms,
+//     Intersect<Name>(...) and Shade<Name>(...), then extend IntersectScene()
+//     to race it against the other families and the shading dispatch in main().
 //   - Raytraced reflections: march a SECOND ray through IntersectScene()
 //     in the shading step (e.g. reflect(ray.Dir, <hit normal>)), and mix
 //     its color into the surface color.
@@ -40,6 +42,7 @@
 #version 430
 
 #include "Raymarcher/Shapes/Plane.inc"
+#include "Raymarcher/Shapes/Terrain.inc"
 #include "Raymarcher/Sky.inc"
 
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
@@ -89,16 +92,18 @@ Ray MakePixelRay(vec2 pixel)
 // ---------------------------------------------------------------------------
 
 // Races every included shape family and keeps the closest hit. Returns true
-// on hit, with the hit distance t and the family-space uv latched.
+// on hit, with the hit distance t, the winner's family-space uv and the
+// winner's family ID (Family<Name>, declared in each shape's .inc) latched.
 //
 // Each family block must follow the plane pattern below: an
 // Intersect<Family>() that returns -1 on miss and only latches its uv when
 // t improves (a farther hit later in the block must never clobber the
 // closest hit's uv).
-bool IntersectScene(Ray ray, out vec2 uv, out float t)
+bool IntersectScene(Ray ray, out vec2 uv, out float t, out int family)
 {
-    t  = -1.0;
-    uv = vec2(0.0);
+    t      = -1.0;
+    uv     = vec2(0.0);
+    family = -1;
 
     // --- Plane family ---
     for (int i = 0; i < MAX_PLANES; i++)
@@ -106,7 +111,15 @@ bool IntersectScene(Ray ray, out vec2 uv, out float t)
         if (i >= PlaneCount) break;
         vec2 candUv;
         float th = IntersectPlane(ray.Origin, ray.Dir, i, candUv);
-        if (th > 0.0 && (t < 0.0 || th < t)) { t = th; uv = candUv; }
+        if (th > 0.0 && (t < 0.0 || th < t)) { t = th; uv = candUv; family = FamilyPlane; }
+    }
+
+    // --- Terrain family ---
+    if (TerrainEnabled > 0)
+    {
+        vec2 candUv;
+        float th = IntersectTerrain(ray.Origin, ray.Dir, candUv);
+        if (th > 0.0 && (t < 0.0 || th < t)) { t = th; uv = candUv; family = FamilyTerrain; }
     }
 
     return t > 0.0;
@@ -134,13 +147,17 @@ void main()
 
     Ray ray = MakePixelRay(vec2(pix));
 
-    // Closest scene hit.
+    // Closest scene hit (uv and family belong to the winning family).
     vec2 uv;
     float t;
+    int family;
     vec3 color;
-    if (IntersectScene(ray, uv, t))
+    if (IntersectScene(ray, uv, t, family))
     {
-        color = ShadePlane(uv);
+        // Dispatch shading to the family that won the race (each shape's
+        // .inc declares its own Shade<Family>(uv); extend the dispatch when
+        // adding a family).
+        color = (family == FamilyTerrain) ? ShadeTerrain(uv) : ShadePlane(uv);
         color = ApplyFog(color, t, ray.Dir);
     }
     else

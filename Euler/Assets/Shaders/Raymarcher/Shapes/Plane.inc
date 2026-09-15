@@ -16,6 +16,12 @@
 
 #define MAX_PLANES 8
 
+// Family ID latched by the driver's IntersectScene() so main() can dispatch
+// shading to the family that won the closest-hit race. Every shape family
+// declares its own ID here in its own .inc (terrain's is FamilyTerrain in
+// Shapes/Terrain.inc) - new families pick the next number.
+const int FamilyPlane = 0;
+
 // Per-plane uniform data lives in PlaneData (3 vec4 per plane):
 //   [0] origin.xyz, size
 //   [1] normal.xyz, textureIndex

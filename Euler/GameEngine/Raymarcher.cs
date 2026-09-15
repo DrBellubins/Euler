@@ -8,7 +8,9 @@ namespace Euler.GameEngine;
 
 /// <summary>
 /// Full-screen raymarch renderer for flat, textured plane primitives
-/// (<see cref="PlanePrimitive"/>).
+/// (<see cref="PlanePrimitive"/>) and an infinite FBM terrain
+/// (<see cref="TerrainPrimitive"/>). Scene contents are modular shape
+/// families - see the includes in <c>Raymarcher.comp</c>.
 ///
 /// Pipeline (compute):
 /// <list type="number">
@@ -44,16 +46,27 @@ public class Raymarcher
     /// </summary>
     private const int PlaneTexUnit = 0;
 
+    /// <summary>
+    /// Texture unit the compute stage samples the terrain texture from. Unit 0
+    /// belongs to the plane family (<see cref="PlaneTexUnit"/>); the same
+    /// pre-dispatch binding rules apply (see the notes there and in Draw).
+    /// </summary>
+    private const int TerrainTexUnit = 1;
+
     /// <summary>SSBO binding point shared by the compute and display stages.</summary>
     private const uint PixelBufferBinding = 0;
 
     private readonly Shader _computeShader;
     private readonly Shader _displayShader;
     private readonly Texture2D _planeTex;
+    private readonly Texture2D _terrainTex;
     private readonly Texture2D _quadTex;   // 1x1 white, only exists to fill the screen
     private readonly PlanePrimitive[] _planes = new PlanePrimitive[MaxPlanes];
     private readonly float[] _planeData = new float[MaxPlanes * 12];
     private int _planeCount;
+    private TerrainPrimitive _terrain;     // at most one (a heightfield spans all XZ)
+    private readonly float[] _terrainData = new float[16];
+    private bool _hasTerrain;
 
     // Output SSBO: one packed RGBA8 uint per pixel (W*H*4 bytes), bound to
     // PixelBufferBinding for both programs.
@@ -67,13 +80,17 @@ public class Raymarcher
     private int _locPlaneCount;
     private int _locPlaneData;
     private int _locPlaneTex;
+    private int _locTerrainEnabled;
+    private int _locTerrainData;
+    private int _locTerrainTex;
 
     // Display shader uniform locations.
     private int _locDisplayResolution;
 
-    public Raymarcher(Texture2D planeTexture)
+    public Raymarcher(Texture2D planeTexture, Texture2D terrainTexture)
     {
         _planeTex = planeTexture;
+        _terrainTex = terrainTexture;
 
         // Both stages go through Resource, so the #include pre-processor runs
         // on the compute source too (before it reaches the GL compiler).
@@ -86,6 +103,9 @@ public class Raymarcher
         _locPlaneCount = Raylib.GetShaderLocation(_computeShader, "PlaneCount");
         _locPlaneData  = Raylib.GetShaderLocation(_computeShader, "PlaneData");
         _locPlaneTex   = Raylib.GetShaderLocation(_computeShader, "PlaneTex");
+        _locTerrainEnabled = Raylib.GetShaderLocation(_computeShader, "TerrainEnabled");
+        _locTerrainData    = Raylib.GetShaderLocation(_computeShader, "TerrainData");
+        _locTerrainTex     = Raylib.GetShaderLocation(_computeShader, "TerrainTex");
         _locDisplayResolution = Raylib.GetShaderLocation(_displayShader, "Resolution");
 
         // A single white pixel is all the full-screen quad needs.
@@ -104,6 +124,17 @@ public class Raymarcher
         _planes[_planeCount++] = plane;
     }
 
+    /// <summary>
+    /// Sets the scene's terrain. A heightfield occupies the whole XZ plane, so
+    /// there is only ever one - a second call REPLACES the first (unlike
+    /// <see cref="AddPlane"/>).
+    /// </summary>
+    public void AddTerrain(TerrainPrimitive terrain)
+    {
+        _terrain = terrain;
+        _hasTerrain = true;
+    }
+
     /// <summary>Draws the raymarched scene for <paramref name="camera"/> (fills the whole window).</summary>
     public void Draw(Camera3D camera)
     {
@@ -116,6 +147,9 @@ public class Raymarcher
 
         for (int i = 0; i < _planeCount; i++)
             _planes[i].WriteInto(_planeData, i);
+
+        if (_hasTerrain)
+            _terrain.WriteInto(_terrainData, 0);
 
         // ---------------------------------------------------------------
         // Stage 1 - compute: raymarch every pixel into the pixel SSBO.
@@ -132,6 +166,10 @@ public class Raymarcher
         Rlgl.ActiveTextureSlot(PlaneTexUnit);
         Rlgl.EnableTexture(_planeTex.Id);
 
+        // The terrain family owns unit 1 (same pre-dispatch binding rule).
+        Rlgl.ActiveTextureSlot(TerrainTexUnit);
+        Rlgl.EnableTexture(_terrainTex.Id);
+
         // SetShaderValue* enables the compute program before uploading (the
         // uniform state lives on the program), so the plain high-level API
         // works for compute shaders too.
@@ -144,6 +182,11 @@ public class Raymarcher
         if (_planeCount > 0)
             Raylib.SetShaderValueV(_computeShader, _locPlaneData, _planeData, ShaderUniformDataType.Vec4, _planeCount * 3);
         Raylib.SetShaderValue(_computeShader, _locPlaneTex, PlaneTexUnit, ShaderUniformDataType.Int);
+
+        Raylib.SetShaderValue(_computeShader, _locTerrainEnabled, _hasTerrain ? 1 : 0, ShaderUniformDataType.Int);
+        if (_hasTerrain)
+            Raylib.SetShaderValueV(_computeShader, _locTerrainData, _terrainData, ShaderUniformDataType.Vec4, 4);
+        Raylib.SetShaderValue(_computeShader, _locTerrainTex, TerrainTexUnit, ShaderUniformDataType.Int);
 
         // Grid rounded up to whole workgroups; the shader guards the tail.
         Rlgl.ComputeShaderDispatch(
@@ -181,6 +224,7 @@ public class Raymarcher
             _pixelBuffer = 0;
         }
         Raylib.UnloadTexture(_planeTex);
+        Raylib.UnloadTexture(_terrainTex);
         Raylib.UnloadTexture(_quadTex);
     }
 
