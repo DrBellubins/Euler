@@ -7,14 +7,15 @@
 //
 // Shader loading:
 //
-//     Shader fs = Resource.LoadShader("Assets/Shaders/Raymarcher.fs", ShaderType.Pixel);
+//     Shader fs = Resource.LoadShader("Assets/Shaders/RaymarcherDisplay.fs", ShaderType.Pixel);
+//     Shader cs = Resource.LoadShader("Assets/Shaders/Raymarcher.comp", ShaderType.Compute);
 //
 // raylib 6.0 has no shader #include support - the file text goes verbatim to
 // the GL driver compiler - so LoadShader pre-processes the source first:
 // every #include "path" line is replaced IN PLACE by the content of the
 // included file (recursively), as if all the files were one big shader.
 // Include paths are resolved relative to the directory of the file containing
-// the directive: a shader in .../Shaders/Raymarcher.fs including
+// the directive: a shader in .../Shaders/Raymarcher.comp including
 // "NewFolder/shader.inc" reads .../Shaders/NewFolder/shader.inc.
 //
 // NOTES:
@@ -25,13 +26,19 @@
 //     missing stage with its built-in default shader (default VS is
 //     gl_Position = mvp * vertexPosition - a full-screen pass-through, so a
 //     .fs loaded as ShaderType.Pixel needs no explicit vertex stage).
-//   - ShaderType.Compute returns a Shader with Locs == null (raylib 6.0 has
-//     no high-level compute API). Validate with Id != 0 (NOT IsShaderValid),
-//     dispatch with Raylib_cs.Rlgl.ComputeShaderDispatch(...), set uniforms
-//     with Raylib.SetShaderValue as usual, and unload with Raylib.UnloadShader.
-//     NOTE: the prebuilt raylib-cs 8.1.0 library is an OpenGL 3.3 build, so
-//     compute loading throws until it is run against a raylib built with
-//     GRAPHICS_API_OPENGL_43.
+//   - ShaderType.Compute: the #include pre-processing above applies to
+//     compute sources EXACTLY like the graphic stages - the file text is
+//     fully expanded (recursively) before it reaches the GL driver compiler.
+//     The preprocessed source is then compiled through rlgl's low-level API
+//     (raylib 6.0 has no high-level compute loader) and returns a Shader
+//     with Locs == null: validate with Id != 0 (NOT IsShaderValid), resolve
+//     uniforms with Raylib.GetShaderLocation, set them with
+//     Raylib.SetShaderValue*, dispatch with Rlgl.ComputeShaderDispatch(...),
+//     and unload with Raylib.UnloadShader. Compute shaders additionally
+//     require GLSL #version 430+ (checked before compiling) and a raylib
+//     built with GRAPHICS_API_OPENGL_43 - this project deploys its own 4.3
+//     build (Euler/native/build-raylib-linux.sh, see the
+//     DeployCustomRaylibLinux target in Euler.csproj).
 // ---------------------------------------------------------------------------
 
 using System.Text;
@@ -78,12 +85,15 @@ public static class Resource
     /// <summary>Maximum nested include depth (safeguard; cycles are caught first).</summary>
     private const int MaxIncludeDepth = 32;
 
-    /// <summary>GL_COMPUTE_SHADER.</summary>
-    private const int GlComputeShader = 0x8B34;
+    /// <summary>GL_COMPUTE_SHADER (see rlgl.h RL_COMPUTE_SHADER / glad.h).</summary>
+    private const int GlComputeShader = 0x91B9;
 
     /// <summary>
     /// Loads, pre-processes (#include expansion) and compiles a shader file,
     /// returning the raylib <see cref="Raylib_cs.Shader"/>.
+    /// The #include pre-processing applies to ALL stages, including compute
+    /// (<see cref="ShaderType.Compute"/>): the file is read and fully expanded
+    /// first, and only the resulting single source is compiled.
     /// Relative paths resolve against the executable directory first, then
     /// the current working directory (see <see cref="ResolveAssetPath"/>).
     /// Throws <see cref="ShaderException"/> (or <see cref="FileNotFoundException"/>)
@@ -259,10 +269,22 @@ public static class Resource
 
     /// <summary>
     /// Compiles a compute shader via the low-level rlgl API (raylib 6.0 has no
-    /// high-level LoadComputeShader). Returns a Shader with Locs == null.
+    /// high-level LoadComputeShader). The source must already be preprocessed
+    /// (#includes expanded) and must declare #version 430+ (enforced here with
+    /// a clear error, since a wrong version produces only a cryptic driver
+    /// log). Returns a Shader with Locs == null.
     /// </summary>
     private static unsafe Raylib_cs.Shader LoadComputeShader(string source)
     {
+        int version = GetGlslVersion(source);
+        if (version < 430)
+            throw new ShaderException(
+                "Compute shaders require GLSL #version 430 or newer" +
+                (version > 0
+                    ? $" but this shader declares #version {version}."
+                    : " but this shader declares no #version.") +
+                " Put '#version 430' as the first line of the .comp file, before any #include.");
+
         using var code = source.ToUtf8Buffer();
 
         uint csId = Raylib_cs.Rlgl.LoadShader(code.AsPointer(), GlComputeShader);
@@ -278,9 +300,39 @@ public static class Resource
 
         if (programId == 0)
             throw new ShaderException(
-                "Compute shader failed to link. Note: the prebuilt raylib-cs library is an " +
-                "OpenGL 3.3 build - use a raylib built with GRAPHICS_API_OPENGL_43 for compute shaders.");
+                "Compute shader failed to link. Compute shaders require a raylib built with " +
+                "GRAPHICS_API_OPENGL_43 - see Euler/native/build-raylib-linux.sh.");
 
         return new Raylib_cs.Shader { Id = programId };
+    }
+
+    /// <summary>
+    /// Returns the GLSL version declared by the first <c>#version</c>
+    /// directive in <paramref name="source"/> (e.g. 430 for "#version 430",
+    /// 450 for "#version 450 core"), or 0 when the source declares none.
+    /// Throws <see cref="ShaderException"/> for a malformed directive.
+    /// </summary>
+    private static int GetGlslVersion(string source)
+    {
+        foreach (string line in source.Split('\n'))
+        {
+            string trimmed = line.TrimStart();
+            if (!trimmed.StartsWith("#version", StringComparison.Ordinal))
+                continue;    // comments/directives before #version are legal GLSL
+
+            // "#version" must be a whole word: #versionFoo is not a directive.
+            if (trimmed.Length > "#version".Length && !char.IsWhiteSpace(trimmed["#version".Length]))
+                continue;
+
+            string rest = trimmed["#version".Length..].Trim();
+            int space = rest.IndexOf(' ');
+            string token = space < 0 ? rest : rest[..space];
+            if (!int.TryParse(token, out int version))
+                throw new ShaderException($"Malformed #version directive: \"{trimmed}\"");
+
+            return version;
+        }
+
+        return 0;
     }
 }

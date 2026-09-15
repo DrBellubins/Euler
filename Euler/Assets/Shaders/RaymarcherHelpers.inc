@@ -1,4 +1,4 @@
-// Shared raymarcher helpers, included from Raymarcher.fs via
+// Shared raymarcher helpers, included from Raymarcher.comp via
 // #include "RaymarcherHelpers.inc" (expanded in place by Resource.LoadShader).
 //
 // NOTE: no #version directive here - included files must never carry one;

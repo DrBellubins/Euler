@@ -1,26 +1,46 @@
-// Fragment stage: computes one ray per pixel, intersects all plane
-// primitives analytically and shades the closest hit with a tiled
-// texture (plus sky + distance fog on misses).
+// Compute stage: raymarches the scene's flat plane primitives for EVERY
+// pixel in parallel (one work item per pixel) and writes one packed RGBA8
+// uint per pixel into the shared pixel buffer (SSBO, binding 0). The
+// display stage (RaymarcherDisplay.fs) then blits that buffer to the
+// screen, so the fragment pipeline only performs a 1:1 buffer read.
 //
 // Per-plane uniform data lives in PlaneData (3 vec4 per plane):
 //   [0] origin.xyz, size
 //   [1] normal.xyz, textureIndex
 //   [2] uvScale.xy, 0, 0
 // See PlanePrimitive.WriteInto for the C# side.
-#version 330
+//
+// NOTES:
+//   - #version 430 is required for compute shaders (dispatch, SSBOs,
+//     layout(local_size...)) and must stay the first line: Resource.LoadShader
+//     expands the #include directives IN PLACE below it (included files must
+//     never carry a #version of their own).
+//   - PlaneTex is sampled from texture unit 0: the C# side binds the texture
+//     there before dispatching and sets the sampler uniform to 0.
+//     Raylib.SetShaderValueTexture must NOT be used for the compute stage -
+//     it defers the real glBindTexture to the batch draw, which happens
+//     AFTER the dispatch.
+#version 430
 
 #include "RaymarcherHelpers.inc"
 
-out vec4 fragColor;
-
 #define MAX_PLANES 8
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
 uniform vec2  Resolution;            // framebuffer size in pixels
 uniform mat4  CamToWorld;            // camera space (y up, -z forward) -> world
 uniform float Focal;                 // 1 / tan(fovY * 0.5), precomputed in C#
 uniform int   PlaneCount;
 uniform vec4  PlaneData[MAX_PLANES * 3];
-uniform sampler2D PlaneTex;
+uniform sampler2D PlaneTex;          // bound to texture unit 0 by the C# side
+
+// One packed RGBA8 uint per screen pixel, shared with the display stage
+// (std430 uint array: 4-byte stride, no padding).
+layout(std430, binding = 0) buffer Pixels
+{
+    uint data[];
+} pixelBuf;
 
 // Analytic ray/plane intersection. Returns distance t (or -1 on miss) and
 // the hit point's UV in *tile space* (already tiled by the plane's UvScale).
@@ -61,22 +81,30 @@ float IntersectPlane(vec3 ro, vec3 rd, int i, out vec2 uv)
 
 void main()
 {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+
+    // The dispatch grid is rounded up to whole workgroups; ignore the tail.
+    if (pix.x >= int(Resolution.x) || pix.y >= int(Resolution.y)) return;
+
     // Pixel center in normalized device coords (y up, -1..1, x aspect-corrected).
-    vec2 ndc = (2.0 * gl_FragCoord.xy - Resolution) / Resolution.y;
+    vec2 ndc = (2.0 * gl_GlobalInvocationID.xy - Resolution) / Resolution.y;
 
     // Pixel ray in camera space, then world space.
     vec3 dirCam = normalize(vec3(ndc, -Focal));
     vec3 rd = normalize((CamToWorld * vec4(dirCam, 0.0)).xyz);
     vec3 ro = (CamToWorld * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
 
-    // Closest plane hit.
+    // Closest plane hit. NOTE: uv is only latched when t improves - the old
+    // fragment shader passed a single out-param into every call, so a farther
+    // plane hit later in the loop would clobber the closest hit's UV.
     float t = -1.0;
     vec2 uv = vec2(0.0);
     for (int i = 0; i < MAX_PLANES; i++)
     {
         if (i >= PlaneCount) break;
-        float th = IntersectPlane(ro, rd, i, uv);
-        if (th > 0.0 && (t < 0.0 || th < t)) t = th;
+        vec2 candUv;
+        float th = IntersectPlane(ro, rd, i, candUv);
+        if (th > 0.0 && (t < 0.0 || th < t)) { t = th; uv = candUv; }
     }
 
     vec3 color;
@@ -95,5 +123,12 @@ void main()
         color = SkyColor(rd);
     }
 
-    fragColor = vec4(color, 1.0);
+    // Pack RGBA8 into one uint (alpha always opaque).
+    // NOTE: the local name must not be 'packed' - it is a reserved GLSL keyword.
+    uint packedPx = (uint(color.r * 255.0 + 0.5))
+                | (uint(color.g * 255.0 + 0.5) << 8)
+                | (uint(color.b * 255.0 + 0.5) << 16)
+                | 0xFF000000u;
+
+    pixelBuf.data[pix.x + pix.y * int(Resolution.x)] = packedPx;
 }

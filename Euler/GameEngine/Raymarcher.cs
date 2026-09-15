@@ -8,23 +8,59 @@ namespace Euler.GameEngine;
 
 /// <summary>
 /// Full-screen raymarch renderer for flat, textured plane primitives
-/// (<see cref="PlanePrimitive"/>). Draws one full-screen quad through a
-/// custom shader; the fragment stage raymarches the scene's planes and
-/// shades the closest hit with a tiled texture.
+/// (<see cref="PlanePrimitive"/>).
+///
+/// Pipeline (compute):
+/// <list type="number">
+/// <item>A compute shader (<c>Raymarcher.comp</c>) raymarches EVERY pixel in
+/// parallel - one work item per pixel - and writes one packed RGBA8 uint per
+/// pixel into an SSBO (binding point 0).</item>
+/// <item>A display shader (<c>RaymarcherDisplay.fs</c>) draws one full-screen
+/// quad that reads its pixel back from that SSBO and writes it to the screen.</item>
+/// </list>
+///
+/// Both stages are loaded through <see cref="Resource.LoadShader"/>, so the
+/// #include pre-processor applies to the compute shader exactly like the
+/// graphic stages.
 /// </summary>
 public class Raymarcher
 {
     public const int MaxPlanes = 8;
 
-    private const string FragmentShaderPath = "Assets/Shaders/Raymarcher.fs";
+    private const string ComputeShaderPath = "Assets/Shaders/Raymarcher.comp";
+    private const string DisplayShaderPath = "Assets/Shaders/RaymarcherDisplay.fs";
 
-    private readonly Shader _shader;
+    /// <summary>
+    /// Compute workgroup edge size (16x16 = 256 invocations). Must match the
+    /// layout(local_size_x/y/z) qualifier in Raymarcher.comp.
+    /// </summary>
+    private const int WorkGroupSize = 16;
+
+    /// <summary>
+    /// Texture unit the compute stage samples <see cref="Raymarcher._planeTex"/>
+    /// from. Chosen as 0: the raylib batch system always rebinds unit 0 to its
+    /// own textures at draw time, so our pre-dispatch binding can never leak
+    /// into a graphics draw.
+    /// </summary>
+    private const int PlaneTexUnit = 0;
+
+    /// <summary>SSBO binding point shared by the compute and display stages.</summary>
+    private const uint PixelBufferBinding = 0;
+
+    private readonly Shader _computeShader;
+    private readonly Shader _displayShader;
     private readonly Texture2D _planeTex;
     private readonly Texture2D _quadTex;   // 1x1 white, only exists to fill the screen
     private readonly PlanePrimitive[] _planes = new PlanePrimitive[MaxPlanes];
     private readonly float[] _planeData = new float[MaxPlanes * 12];
     private int _planeCount;
 
+    // Output SSBO: one packed RGBA8 uint per pixel (W*H*4 bytes), bound to
+    // PixelBufferBinding for both programs.
+    private uint _pixelBuffer;
+    private int _pixelBufferCount;         // number of pixels the buffer covers
+
+    // Compute shader uniform locations.
     private int _locResolution;
     private int _locCamToWorld;
     private int _locFocal;
@@ -32,27 +68,32 @@ public class Raymarcher
     private int _locPlaneData;
     private int _locPlaneTex;
 
+    // Display shader uniform locations.
+    private int _locDisplayResolution;
+
     public Raymarcher(Texture2D planeTexture)
     {
         _planeTex = planeTexture;
 
-        // The fragment stage does all the work and is loaded through
-        // Resource (with #include preprocessing). The vertex stage is
-        // raylib's built-in default (mvp * vertexPosition) - identical to the
-        // old Raymarcher.vs, so it is no longer loaded explicitly.
-        _shader = Resource.LoadShader(FragmentShaderPath, ShaderType.Pixel);
+        // Both stages go through Resource, so the #include pre-processor runs
+        // on the compute source too (before it reaches the GL compiler).
+        _computeShader = Resource.LoadShader(ComputeShaderPath, ShaderType.Compute);
+        _displayShader = Resource.LoadShader(DisplayShaderPath, ShaderType.Pixel);
 
-        _locResolution = Raylib.GetShaderLocation(_shader, "Resolution");
-        _locCamToWorld = Raylib.GetShaderLocation(_shader, "CamToWorld");
-        _locFocal      = Raylib.GetShaderLocation(_shader, "Focal");
-        _locPlaneCount = Raylib.GetShaderLocation(_shader, "PlaneCount");
-        _locPlaneData  = Raylib.GetShaderLocation(_shader, "PlaneData");
-        _locPlaneTex   = Raylib.GetShaderLocation(_shader, "PlaneTex");
+        _locResolution = Raylib.GetShaderLocation(_computeShader, "Resolution");
+        _locCamToWorld = Raylib.GetShaderLocation(_computeShader, "CamToWorld");
+        _locFocal      = Raylib.GetShaderLocation(_computeShader, "Focal");
+        _locPlaneCount = Raylib.GetShaderLocation(_computeShader, "PlaneCount");
+        _locPlaneData  = Raylib.GetShaderLocation(_computeShader, "PlaneData");
+        _locPlaneTex   = Raylib.GetShaderLocation(_computeShader, "PlaneTex");
+        _locDisplayResolution = Raylib.GetShaderLocation(_displayShader, "Resolution");
 
         // A single white pixel is all the full-screen quad needs.
         Image img = Raylib.GenImageColor(1, 1, Color.White);
         _quadTex = Raylib.LoadTextureFromImage(img);
         Raylib.UnloadImage(img);
+
+        CreatePixelBuffer(Engine.ScreenWidth, Engine.ScreenHeight);
     }
 
     /// <summary>Adds a plane (up to <see cref="MaxPlanes"/>).</summary>
@@ -66,24 +107,65 @@ public class Raymarcher
     /// <summary>Draws the raymarched scene for <paramref name="camera"/> (fills the whole window).</summary>
     public void Draw(Camera3D camera)
     {
+        int width = Engine.ScreenWidth;
+        int height = Engine.ScreenHeight;
+
+        // Recreate the pixel buffer if the framebuffer size changed.
+        if (_pixelBufferCount != width * height)
+            CreatePixelBuffer(width, height);
+
         for (int i = 0; i < _planeCount; i++)
             _planes[i].WriteInto(_planeData, i);
 
-        Raylib.BeginShaderMode(_shader);
+        // ---------------------------------------------------------------
+        // Stage 1 - compute: raymarch every pixel into the pixel SSBO.
+        // ---------------------------------------------------------------
 
-        Raylib.SetShaderValue(_shader, _locResolution,
-            new Vector2(Engine.ScreenWidth, Engine.ScreenHeight), ShaderUniformDataType.Vec2);
+        // PlaneTex must be bound to a KNOWN unit before the dispatch.
+        // Raylib.SetShaderValueTexture is deliberately NOT used here: it only
+        // records the texture in the batch's active-texture table and the real
+        // glBindTexture happens at batch-draw time - AFTER the dispatch - so
+        // the compute stage would sample a stale/other texture. Unit 0 is
+        // safe: the batch always rebinds unit 0 to its own textures when it
+        // flushes (see rlDrawRenderBatch), so this binding can't leak into a
+        // graphics draw.
+        Rlgl.ActiveTextureSlot(PlaneTexUnit);
+        Rlgl.EnableTexture(_planeTex.Id);
+
+        // SetShaderValue* enables the compute program before uploading (the
+        // uniform state lives on the program), so the plain high-level API
+        // works for compute shaders too.
+        Raylib.SetShaderValue(_computeShader, _locResolution,
+            new Vector2(width, height), ShaderUniformDataType.Vec2);
         SetCameraMatrix(camera);
-        Raylib.SetShaderValue(_shader, _locFocal,
+        Raylib.SetShaderValue(_computeShader, _locFocal,
             1f / MathF.Tan(GMath.ToRadians(camera.FovY) * 0.5f), ShaderUniformDataType.Float);
-        Raylib.SetShaderValue(_shader, _locPlaneCount, _planeCount, ShaderUniformDataType.Int);
+        Raylib.SetShaderValue(_computeShader, _locPlaneCount, _planeCount, ShaderUniformDataType.Int);
         if (_planeCount > 0)
-            Raylib.SetShaderValueV(_shader, _locPlaneData, _planeData, ShaderUniformDataType.Vec4, _planeCount * 3);
-        Raylib.SetShaderValueTexture(_shader, _locPlaneTex, _planeTex);
+            Raylib.SetShaderValueV(_computeShader, _locPlaneData, _planeData, ShaderUniformDataType.Vec4, _planeCount * 3);
+        Raylib.SetShaderValue(_computeShader, _locPlaneTex, PlaneTexUnit, ShaderUniformDataType.Int);
 
-        // One full-screen quad; the fragment shader does the actual work.
+        // Grid rounded up to whole workgroups; the shader guards the tail.
+        Rlgl.ComputeShaderDispatch(
+            (uint)((width + WorkGroupSize - 1) / WorkGroupSize),
+            (uint)((height + WorkGroupSize - 1) / WorkGroupSize),
+            1);
+
+        // The dispatch's SSBO writes must complete before the display
+        // fragment stage reads the pixel buffer (OpenGL memory consistency
+        // model; raylib's dispatch wrapper is a bare glDispatchCompute).
+        RL.MemoryBarrierShaderStorageBuffer();
+
+        // ---------------------------------------------------------------
+        // Stage 2 - display: blit the pixel SSBO to the screen.
+        // ---------------------------------------------------------------
+        Raylib.BeginShaderMode(_displayShader);
+        Raylib.SetShaderValue(_displayShader, _locDisplayResolution,
+            new Vector2(width, height), ShaderUniformDataType.Vec2);
+
+        // One full-screen quad; the display shader does the actual pixel read.
         Raylib.DrawTextureRec(_quadTex,
-            new Rectangle(0, 0, Engine.ScreenWidth, Engine.ScreenHeight),
+            new Rectangle(0, 0, width, height),
             Vector2.Zero, Color.White);
 
         Raylib.EndShaderMode();
@@ -91,15 +173,42 @@ public class Raymarcher
 
     public void Unload()
     {
-        Raylib.UnloadShader(_shader);
+        Raylib.UnloadShader(_computeShader);
+        Raylib.UnloadShader(_displayShader);
+        if (_pixelBuffer != 0)
+        {
+            Rlgl.UnloadShaderBuffer(_pixelBuffer);
+            _pixelBuffer = 0;
+        }
         Raylib.UnloadTexture(_planeTex);
         Raylib.UnloadTexture(_quadTex);
     }
 
     /// <summary>
+    /// (Re)creates the pixel SSBO for a <paramref name="width"/>x<paramref name="height"/>
+    /// framebuffer and binds it to <see cref="PixelBufferBinding"/>. Binding
+    /// points are context-global GL state, so the single bind makes the buffer
+    /// visible to BOTH the compute and the display program without any
+    /// per-program uniform.
+    /// </summary>
+    private void CreatePixelBuffer(int width, int height)
+    {
+        if (_pixelBuffer != 0)
+        {
+            Rlgl.UnloadShaderBuffer(_pixelBuffer);
+            _pixelBuffer = 0;
+        }
+
+        // One uint (packed RGBA8) per pixel; raylib zero-clears the buffer.
+        _pixelBuffer = RL.LoadShaderBuffer(width * height * 4);
+        Rlgl.BindShaderBuffer(_pixelBuffer, PixelBufferBinding);
+        _pixelBufferCount = width * height;
+    }
+
+    /// <summary>
     /// Builds the camera-to-world matrix from the camera's
     /// position/orientation (x = right, y = true-up, z = -forward) and uploads
-    /// it.
+    /// it to the compute stage.
     /// </summary>
     private void SetCameraMatrix(Camera3D camera)
     {
@@ -120,6 +229,6 @@ public class Raymarcher
             right.Y, up.Y, -forward.Y, camera.Position.Y,
             right.Z, up.Z, -forward.Z, camera.Position.Z,
             0f, 0f, 0f, 1f);
-        Raylib.SetShaderValueMatrix(_shader, _locCamToWorld, mat);
+        Raylib.SetShaderValueMatrix(_computeShader, _locCamToWorld, mat);
     }
 }

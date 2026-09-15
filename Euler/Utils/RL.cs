@@ -31,6 +31,7 @@
 //   Audio      : LoadWaveSamples
 //   Models     : LoadMaterials
 //   Shaders    : LoadShaderFromMemory
+//   Compute    : LoadShaderBuffer
 //   Window     : GetWindowHandle
 //   Raymath    : MatrixDecompose, QuaternionToAxisAngle, Vector3OrthoNormalize
 //
@@ -778,6 +779,50 @@ public static class RL
             if (fsMem != IntPtr.Zero) Marshal.ZeroFreeCoTaskMemUTF8(fsMem);
         }
     }
+
+    // -------------------------------------------------------------------
+    // Compute shaders / SSBOs
+    // -------------------------------------------------------------------
+
+    /// <summary>
+    /// Pointer-free <c>Rlgl.LoadShaderBuffer</c>: creates a shader storage
+    /// buffer of <paramref name="size"/> bytes with no initial data (raylib
+    /// zero-clears it) and returns its buffer id.
+    /// The remaining SSBO API takes no pointers - call it directly on
+    /// <c>Rlgl</c>: <c>BindShaderBuffer</c>, <c>UpdateShaderBuffer</c>,
+    /// <c>ReadShaderBuffer</c>, <c>CopyShaderBuffer</c>,
+    /// <c>GetShaderBufferSize</c>, <c>UnloadShaderBuffer</c> (release),
+    /// <c>ComputeShaderDispatch</c> (dispatch), <c>LoadShaderProgramCompute</c>.
+    /// </summary>
+    public static unsafe uint LoadShaderBuffer(int size)
+    {
+        return Rlgl.LoadShaderBuffer((uint)size, null, 0);   // usageHint 0 -> raylib's STREAM_COPY default
+    }
+
+    /// <summary>
+    /// <c>glMemoryBarrier(GL_SHADER_STORAGE_BUFFER_BARRIER_BIT)</c>.
+    ///
+    /// raylib-cs does not expose this: in the raylib 6.0 glad instance,
+    /// <c>glMemoryBarrier</c> is a function-pointer VARIABLE (glad_glMemoryBarrier),
+    /// not a callable export - so this P/Invokes the system GL library
+    /// directly (the same libGL that raylib's glad resolves entry points
+    /// from at init). Linux-only, matching the project's Linux 4.3 raylib
+    /// deployment.
+    ///
+    /// Required by the compute pipeline: per the OpenGL memory consistency
+    /// model, SSBO writes made by a compute dispatch are only visible to
+    /// reads from other stages (e.g. the display fragment stage) when this
+    /// barrier is issued between the dispatch and the reading draw.
+    /// raylib's <c>rlComputeShaderDispatch</c> is a bare <c>glDispatchCompute</c>
+    /// and does not issue one.
+    /// </summary>
+    public static void MemoryBarrierShaderStorageBuffer()
+    {
+        glMemoryBarrier(0x00002000u);   // GL_SHADER_STORAGE_BUFFER_BARRIER_BIT
+    }
+
+    [DllImport("libGL.so.1")]
+    private static extern void glMemoryBarrier(uint barriers);
 
     // -------------------------------------------------------------------
     // Window
