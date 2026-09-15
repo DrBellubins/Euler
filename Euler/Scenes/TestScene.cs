@@ -24,7 +24,7 @@ public class TestScene : Scene
         // stays available for future scenes via AddPlane).
         raymarcher.AddTerrain(new TerrainPrimitive(
             offset: new Vector3(0, -4, 0),
-            amplitude: 3.5f,   // peaks reach y = -0.5, below the camera's start height (0)
+            amplitude: 7.5f,   // peaks reach y = -0.5, below the camera's start height (0)
             frequency: 0.04f,
             octaves: 5,
             uvScale: new Vector2(0.5f, 0.5f),
@@ -58,8 +58,11 @@ public class TestScene : Scene
         
         raymarcher.Draw(freecam.Camera);
 
-        Raylib.DrawText($"Current speed mult: {freecam.CurrentSpeedMultiplier}",
+        Raylib.DrawText($"Position: {freecam.Camera.Position}",
             0, 0, 24, Color.White);
+        
+        Raylib.DrawText($"Current speed mult: {freecam.CurrentSpeedMultiplier}",
+            0, 28, 24, Color.White);
         
         Raylib.EndDrawing();
     }

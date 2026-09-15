@@ -59,7 +59,11 @@ float ValueNoise(vec2 p)
 {
     vec2 i = floor(p);
     vec2 f = fract(p);
-    vec2 u = f * f * f * (f * (f * 3.0 - 6.0) + 3.0);   // quintic fade (C2)
+    // True quintic: 0 at f=0, 1 at f=1, zero slope at both ends (C2).
+    // NOTE: the blend MUST reach 1.0 at f=1 - a curve that returns to 0 at
+    // the cell boundary (e.g. 3f^2-6f+3) leaves every lattice cell showing
+    // its own corner hash: a grid of flat squares instead of smooth noise.
+    vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
     float n00 = Hash21(i + vec2(0.0, 0.0));
     float n10 = Hash21(i + vec2(1.0, 0.0));
     float n01 = Hash21(i + vec2(0.0, 1.0));
