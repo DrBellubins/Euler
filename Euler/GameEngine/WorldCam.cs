@@ -14,9 +14,9 @@ namespace Euler.GameEngine;
 /// the fourth axis) - and the 3D camera (HUD, derived view) is derived from
 /// it.
 ///
-/// Every frame <see cref="Update"/> applies yaw/pitch as 2D rotations in the
-/// (Forward, Left) and (Forward, Up) planes (w untouched), integrates local
-/// movement along the basis, and re-projects the whole state ONTO the
+/// Every frame <see cref="Update"/> applies yaw/pitch/roll as 2D rotations in
+/// the (Forward, Left), (Forward, Up) and (Left, Up) planes (w untouched),
+/// integrates local movement along the basis, and re-projects the whole state ONTO the
 /// wormhole hypersurface (point snapped, basis Gram-Schmidt'ed against the
 /// space normal) - the C# twin of the GLSL <c>SpaceNormalize</c> the per-
 /// pixel march uses. The C# and GLSL space SDF/normal below are deliberate
@@ -39,9 +39,11 @@ public class WorldCam
     private float _rmaj2;
     private float _rmin;
 
-    // The 3D view direction used by the derived camera while the 4D forward
-    // points into the throat (its xyz projection degenerates to zero).
+    // The 3D view direction and up used by the derived camera while the 4D
+    // forward/up point into the throat (their xyz projections degenerate to
+    // zero).
     private Vector3 _lastForward3 = new(0f, 0f, 1f);
+    private Vector3 _lastUp3 = Vector3.UnitY;
 
     public WorldCam(Vector3 center, Vector4 pos, Vector4 forward, Vector4 left, Vector4 up)
     {
@@ -68,12 +70,13 @@ public class WorldCam
 
     /// <summary>
     /// Advances the 4D camera one frame. <paramref name="yawDelta"/> /
-    /// <paramref name="pitchDelta"/> are radians (screen-drag deltas), and
+    /// <paramref name="pitchDelta"/> / <paramref name="rollDelta"/> are
+    /// radians (screen-drag / Q-E key deltas, positive roll = left), and
     /// <paramref name="move"/> is local displacement in (Forward, Left, Up)
     /// components, world units. <paramref name="wormhole"/> may have moved
     /// (the basis is re-projected onto its hypersurface).
     /// </summary>
-    public void Update(float yawDelta, float pitchDelta, Vector3 move, WormholePrimitive wormhole)
+    public void Update(float yawDelta, float pitchDelta, float rollDelta, Vector3 move, WormholePrimitive wormhole)
     {
         Center = wormhole.Center;
         _rmaj = wormhole.Rmaj;
@@ -97,6 +100,16 @@ public class WorldCam
         Vector4 F1 = Forward, U0 = Up;
         Forward = F1 * cp + U0 * sp;
         Up = -F1 * sp + U0 * cp;
+
+        // Roll: 2D rotation in the (Left, Up) plane, applied AFTER yaw/pitch
+        // (camera * yaw * pitch * roll order) so it spins the already-aimed
+        // view around Forward (Q/E). Forward is untouched; orthonormality is
+        // preserved exactly as with the yaw/pitch rotations.
+        float cr = MathF.Cos(rollDelta);
+        float sr = MathF.Sin(rollDelta);
+        Vector4 L2 = Left, U2 = Up;
+        Left = L2 * cr - U2 * sr;
+        Up = L2 * sr + U2 * cr;
 
         Pos += Forward * move.X + Left * move.Y + Up * move.Z;
 
@@ -180,8 +193,9 @@ public class WorldCam
 
     /// <summary>
     /// The derived 3D camera (HUD / display). Position is the 4D position's
-    /// xyz; the view direction is Forward's xyz, remembered while it points
-    /// into the throat (zero 3D projection).
+    /// xyz; the view direction is Forward's xyz and the up is Up's xyz, both
+    /// remembered while they point into the throat (zero 3D projection). The
+    /// up is what carries Q/E roll into the 3D view.
     /// </summary>
     public Camera3D ToCamera3D(float fovY = 90f)
     {
@@ -194,11 +208,19 @@ public class WorldCam
             _lastForward3 = f3;
         }
 
+        Vector3 u3 = new(Up.X, Up.Y, Up.Z);
+        float lu = u3.Length();
+        if (lu > 0.01f)
+        {
+            u3 /= lu;
+            _lastUp3 = u3;
+        }
+
         return new Camera3D
         {
             Position = pos,
             Target = pos + _lastForward3,
-            Up = Vector3.UnitY,
+            Up = _lastUp3,
             FovY = fovY,
             Projection = CameraProjection.Perspective
         };

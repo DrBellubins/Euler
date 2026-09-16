@@ -131,6 +131,9 @@ public static class Input
     public static bool Crouch() => _currentKeys[(int)KeyboardKey.LeftControl];
     public static bool Jump() => _currentKeys[(int)KeyboardKey.Space];
 
+    public static bool RollLeft() => _currentKeys[(int)KeyboardKey.Q];
+    public static bool RollRight() => _currentKeys[(int)KeyboardKey.E];
+
     /*public static bool Jump(bool isCrouching)
     {
         return isCrouching ? IsKeyPressed(KeyboardKey.Space) : _currentKeys[(int)KeyboardKey.Space];

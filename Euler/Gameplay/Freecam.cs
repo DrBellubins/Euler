@@ -11,6 +11,7 @@ public class Freecam
     public const float FastSpeed = 15f;
     public const float LookSensitivity = 0.0022f;
     public const float MaxPitch = 89.0f;
+    public const float RollSpeed = 90f; // degrees per second (Q/E)
     
     public Camera3D Camera = new();
 
@@ -36,8 +37,16 @@ public class Freecam
     /// <summary>This frame's movement scale (speed * dt), world units per unit LocalMove.</summary>
     public float MoveSpeed;
 
+    /// <summary>
+    /// This frame's roll delta in radians (Q = left/positive, E = right),
+    /// Q/E held * RollSpeed * dt. Consumed by the 3D integration below or,
+    /// when <see cref="WorldCamEnabled"/>, by the scene's WorldCam.
+    /// </summary>
+    public float RollDelta;
+
     private float yaw;
     private float pitch;
+    private float roll;
 
     public void Start()
     {
@@ -56,12 +65,22 @@ public class Freecam
 
         LookDelta = Input.LookDelta;
 
+        float dt = Time.DeltaTimeF;
+
+        // This frame's roll (Q/E), radians - consumed by the 3D integration
+        // below or, when WorldCamEnabled, by the scene's WorldCam (which owns
+        // its own basis, like LocalMove).
+        RollDelta = ((Input.RollLeft() ? 1 : 0) - (Input.RollRight() ? 1 : 0))
+            * GMath.ToRadians(RollSpeed) * dt;
+
         if (Input.CursorLocked && !WorldCamEnabled)
         {
             yaw += LookDelta.X * LookSensitivity;
             
             pitch = GMath.Clamp(pitch - LookDelta.Y * LookSensitivity,
                 -GMath.ToRadians(MaxPitch), GMath.ToRadians(MaxPitch));
+
+            roll += RollDelta;
         }
         
         Vector3 forward = new(
@@ -69,9 +88,17 @@ public class Freecam
             MathF.Sin(pitch),
             MathF.Cos(yaw) * MathF.Cos(pitch));
 
-        Vector3 right = Vector3.Normalize(Vector3.Cross(Camera.Up, forward));
+        // Camera up: world up rolled around the view axis (Q/E), so the
+        // derived view (and strafing, which follows this up) rotates with it.
+        float cr = MathF.Cos(roll);
+        float sr = MathF.Sin(roll);
+        Vector3 up = Vector3.Normalize(
+            Vector3.UnitY * cr
+            + Vector3.Cross(forward, Vector3.UnitY) * sr
+            + forward * Vector3.Dot(forward, Vector3.UnitY) * (1f - cr));
+        Camera.Up = up;
 
-        float dt = Time.DeltaTimeF;
+        Vector3 right = Vector3.Normalize(Vector3.Cross(up, forward));
 
         CurrentSpeedMultiplier += Input.ScrollDelta() * 0.05f;
         CurrentSpeedMultiplier = GMath.Clamp(CurrentSpeedMultiplier, 0.1f, 2.0f);

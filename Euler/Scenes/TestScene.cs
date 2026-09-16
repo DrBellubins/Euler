@@ -51,6 +51,7 @@ public class TestScene : Scene
         worldCam.Update(
             yawDelta:   -freecam.LookDelta.X * Freecam.LookSensitivity,
             pitchDelta: -freecam.LookDelta.Y * Freecam.LookSensitivity,
+            rollDelta:  freecam.RollDelta,
             move:       freecam.LocalMove * freecam.MoveSpeed,
             wormhole);
 
