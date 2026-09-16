@@ -54,7 +54,7 @@ public class Engine
         
         while (IsRunning)
         {
-            if (Raylib.WindowShouldClose() || Raylib.IsKeyPressed(KeyboardKey.Q))
+            if (Raylib.WindowShouldClose())
                 break;
             
             // Cap frame rate with optimized spin-wait
@@ -83,6 +83,7 @@ public class Engine
         
         Console.WriteLine("Exiting...");
         Exit();
+        hardExit();
     }
     
     public void Update()
@@ -98,6 +99,11 @@ public class Engine
     }
 
     public void Exit()
+    {
+        IsRunning = false;
+    }
+    
+    private void hardExit()
     {
         Environment.Exit(0);
     }

@@ -1,165 +1,127 @@
-// Wormhole shape family for the raymarcher.
+// Traversable wormhole: a 4D spacetime modification for the raymarcher.
 //
-// Included from Raymarcher.comp. A wormhole mouth has two parts:
+// Included from Raymarcher.comp. Port of the Shadertoy traversable wormhole
+// (fork of "Simple wormhole" by A_Toaster): space is a 4D HYPERSURFACE made
+// of two flat 3D sheets (w = +Rmin and w = -Rmin, the two "universes") joined
+// by a torus tube around the rim circle of radius Rmaj at w = 0 (the throat).
+// Light rays live ON this hypersurface - a ray that enters the mouth (the 3D
+// ball of radius Rmaj) is carried around the throat and emerges on the other
+// sheet, where it can see the other universe.
 //
-//   1. The EVENT HORIZON: a sphere of radius Rs (WormholeData.w) that
-//      captures every light ray that reaches it (a pixel whose ray is
-//      captured renders the black disc with a photon-ring rim, see
-//      ShadeWormhole()). The horizon is added to the driver's closest-hit
-//      race like any other family (IntersectWormhole below).
+// This file owns the 4D space geometry and the 4D camera uniform. The
+// per-pixel FLOW (gate, analytic pre-test, throat march, sheet handoff) is in
+// the driver (Raymarcher.comp), which relies on this file's key property:
 //
-//   2. The GRAVITATIONAL FIELD: every ray that passes within
-//      WORMHOLE_BEND_RADIUS of the mouth center has its direction bent.
-//      The bending is NOT analytic - it is integrated per pixel: the
-//      driver (main() in Raymarcher.comp) advances the ray in small steps
-//      and, between IntersectScene() steps, rotates Dir toward the center
-//      (the "bend ray.Dir between IntersectScene() steps" extension point
-//      documented in the driver header). This file owns the field
-//      parameters and the helpers the driver's loop uses:
+//   A 4D ray on the throat cannot reach a scene object before it leaves the
+//   curved region. Objects sit on the flat sheets; a ray on the tube meets a
+//   sheet level (|w| = Rmin) only at the rim (|xyz| = Rmaj). So the throat
+//   march needs NO per-step scene SDF: it steps by the SPACE step limit only
+//   (cheap - a handful of sqrt/dot per step, unlike an FBM march), and the
+//   driver takes over with the exact analytic path at the exit point.
 //
-//         RayBendsAroundWormhole()   - cheap gate: does this ray enter the field?
-//         WormholeBendPreflight()    - skip straight to the field entrance
-//         ShadeWormhole()            - black disc + photon-ring rim
+// The camera is 4D-AUTHORITATIVE (WorldCam in C#): a 3D camera degenerates
+// when it points into the mouth (its view direction then has no 3D
+// projection), so the camera state lives in 4D and the 3D HUD camera is
+// derived from it (xyz of the 4D position/basis).
 //
-// PHYSICS: the per-step deflection uses the Newtonian photon equation with
-// gravitational parameter mu = Rs (acceleration a = -Rs * d / r^3). For a
-// point mass this reproduces the general-relativistic deflection angle of a
-// photon exactly: delta = 2 Rs / b (GR's light bending is twice the
-// Newtonian value for massive particles; setting mu = Rs - the
-// Schwarzschild radius - makes the two agree). Consequences the integration
-// produces for free:
-//
-//   - rays with impact parameter b < 3*sqrt(3)/2 * Rs ~ 2.6 Rs spiral in
-//     and cross the horizon (captured -> black disc),
-//   - rays just above that critical value orbit the throat one or more
-//     times before escaping -> the bright photon ring / Einstein ring,
-//   - rays far out bend weakly (delta = 2 Rs / b) -> lensed sky/terrain.
-//
-// Only ONE wormhole exists per scene: the field is a per-pixel global
-// effect (like the terrain), not an arrayed primitive.
+// Only ONE wormhole exists per scene: it is a per-pixel global effect (like
+// the terrain), not an arrayed primitive.
 //
 // NOTE: no #version directive here - included files must never carry one;
 // #version must remain the first line of the main (expanding) shader.
 
-// Family ID latched by the driver's IntersectScene() so main() can dispatch
-// shading (see Plane.inc).
-const int FamilyWormhole = 2;
-
-// Per-wormhole uniform data (one vec4):
-//   [0] center.xyz, Rs (event horizon radius)
+// Per-wormhole uniform data (2 vec4):
+//   [0] center.xyz, rMaj (rim / mouth radius)
+//   [1] rMin (tube radius; the sheets sit at w = +-rMin), 0, 0
 // See WormholePrimitive.WriteInto for the C# side.
-uniform int   WormholeEnabled;
-uniform vec4  WormholeData;
+uniform int  WormholeEnabled;   // 0/1: the scene has a wormhole
+uniform vec4 WormholeData[2];
 
-// The field extends to 7*Rs: at the edge a ray is deflected by
-// delta = 2 Rs / (7 Rs) ~ 16 degrees - enough for the lensed halo to be
-// visible, small enough that most of the screen stays on the exact
-// analytic trace.
-const float WORMHOLE_BEND_RADIUS_FACTOR = 7.0;
+// 4D camera: columns (Forward, Left, Up, Pos) in WORMHOLE-LOCAL space
+// (xyz = world - center, w = the fourth axis). See WorldCam (C#) for the
+// state machine that keeps this basis on the hypersurface.
+uniform mat4 WormholeCam;
 
-// Max deflection steps per pixel. Near-critical rays orbit the throat for
-// several turns before escaping or being captured and would like more;
-// typical bent rays need < 60 steps. The budget is kept modest on purpose:
-// the ring pixels that exhaust it are a thin band that would otherwise
-// dominate the compute dispatch (worst-case work per pixel), and an
-// exhausted ray falls back to an exact straight tail trace, so the cost
-// cap costs only a slightly softer photon ring, not correctness.
-#define WORMHOLE_MAX_BEND_STEPS 160
+float WhRmaj()   { return WormholeData[0].w; }
+float WhRmin()   { return WormholeData[1].x; }
+vec3  WhCenter() { return WormholeData[0].xyz; }
 
-vec3  WormholeCenter()     { return WormholeData.xyz; }
-float WormholeRadius()     { return WormholeData.w; }
-float WormholeBendRadius() { return WORMHOLE_BEND_RADIUS_FACTOR * WormholeRadius(); }
-float WormholeBendRadius2(){ float b = WormholeBendRadius(); return b * b; }
+// Max throat-march steps per pixel. A full sheet-to-sheet crossing around
+// the inner wall is ~pi*(rMaj - rMin) + 2*rMin of arc; at the 0.1*rMin step
+// floor that is ~60 steps for the scene's sizing, so this covers a full
+// crossing plus a partial second loop. An exhausted ray falls back to the
+// exact 3D path (the driver), so the cap costs only a thin band of pixels,
+// not correctness.
+#define WH_MAX_STEPS 128
 
 // ---------------------------------------------------------------------------
-// Event horizon (the family's "surface")
+// 4D space geometry (the hypersurface the camera and rays live on)
 // ---------------------------------------------------------------------------
 
-// Analytic ray/sphere intersection against the event horizon. Returns the
-// hit distance t (or -1 on miss). The family's rim shading is computed by
-// the driver from the hit POSITION (ShadeWormhole(normalize(hitPos - center),
-// rayDir)), so *uv carries no family-specific data.
-float IntersectWormhole(vec3 ro, vec3 rd, out vec2 uv)
+// The space's 4D normal at p. On the flat sheets it is +-w; in the curved
+// region it points from the nearest rim point AWAY from it, toward p (the
+// tube is a torus around the rim circle, so its surface normal is the radial
+// direction in the (radial, w) cross-section plane). The snap in
+// SpaceNormalize is p -= s * n, which with THIS sign pulls a point onto the
+// surface from either side (the Shadertoy original's exact convention).
+vec4 SpaceNormal(vec4 p)
 {
-    uv = vec2(0.0);
+    if (dot(p.xyz, p.xyz) >= WhRmaj() * WhRmaj())
+        return vec4(0.0, 0.0, 0.0, (p.w >= 0.0) ? 1.0 : -1.0);
 
-    vec3  oc = ro - WormholeCenter();
-    float rs = WormholeRadius();
-    float b  = dot(oc, rd);
-    float c  = dot(oc, oc) - rs * rs;
-    float disc = b * b - c;
-    if (disc <= 0.0) return -1.0;
-
-    float sq = sqrt(disc);
-    float t  = -b - sq;              // near surface
-    if (t <= 0.0) t = -b + sq;       // degenerate: camera inside the sphere
-    if (t <= 0.0) return -1.0;
-
-    return t;
+    float rl = length(p.xyz);
+    // Guard the w axis: at p.xyz = 0 every rim point is equidistant, so any
+    // radial direction is a valid normal (the surface is symmetric there).
+    vec3 dir3 = (rl > 1e-5) ? p.xyz / rl : vec3(0.0, 1.0, 0.0);
+    return normalize(p - vec4(dir3 * WhRmaj(), 0.0));
 }
 
-// ---------------------------------------------------------------------------
-// Bending field helpers (used by the driver's bent-ray loop)
-// ---------------------------------------------------------------------------
-
-// The driver's fog (ApplyFog in Raymarcher.comp) is 1 - exp(-0.010 * t),
-// which is >= 99% past ~460 units. A mouth farther away than that is
-// invisible through the fog, so the (expensive) bent pass is skipped
-// entirely: lensing stops rendering exactly when the wormhole is past the
-// fog distance. (The event horizon disc itself is still traced analytically
-// on the straight path - it stays "eternally black" and unfogged.)
-const float WORMHOLE_FOG_CULL_DIST  = 460.0;
-const float WORMHOLE_FOG_CULL_DIST2 = WORMHOLE_FOG_CULL_DIST * WORMHOLE_FOG_CULL_DIST;
-
-// Cheap gate for the driver's main(): true when the straight ray (ro, rd)
-// ever comes within the bend radius of the mouth, and the camera is within
-// the fog cull distance of it (past that the mouth is invisible anyway).
-bool RayBendsAroundWormhole(vec3 ro, vec3 rd)
+// Signed distance to the hypersurface: sheet distance (|w| - rMin) in the
+// flat region, torus distance (distance to the rim circle - rMin) in the
+// curved region. Used ONLY for the snap in SpaceNormalize (the march's step
+// limit is SpaceStepLimit), so the branch's small discontinuity at the rim
+// is harmless - the two branches agree there (the tube meets the sheets at
+// |xyz| = Rmaj, w = +-Rmin).
+float SpaceSdf(vec4 p)
 {
-    vec3 oc = ro - WormholeCenter();
-    if (dot(oc, oc) >= WORMHOLE_FOG_CULL_DIST2) return false;  // mouth lost in fog
-    float b = dot(oc, rd);
-    // Closest point on the ray (t >= 0) to the mouth center.
-    vec3 closest = (b < 0.0) ? oc : (oc + rd * b);
-    return dot(closest, closest) < WormholeBendRadius2();
+    if (dot(p.xyz, p.xyz) >= WhRmaj() * WhRmaj())
+        return abs(p.w) - WhRmin();
+
+    float rl = length(p.xyz);
+    vec3 dir3 = (rl > 1e-5) ? p.xyz / rl : vec3(0.0, 1.0, 0.0);
+    return length(vec4(dir3 * WhRmaj(), 0.0) - p) - WhRmin();
 }
 
-// Advances ro straight along rd to the ENTRANCE of the bend sphere and
-// returns the skipped distance (0 when the camera is already inside the
-// field or the ray never enters it). Lets the driver's loop start where
-// the bending actually matters.
-float WormholeBendPreflight(vec3 ro, vec3 rd, out vec3 newRo)
+// Snaps p ONTO the hypersurface and constrains d to be TANGENT to it (one
+// Gram-Schmidt step against the space normal). This is what keeps the 4D
+// march on the surface of space - the non-Euclidean heart of the wormhole:
+// the ray is advanced in a straight 4D line, then re-projected, so between
+// steps it "curves" around the throat.
+void SpaceNormalize(inout vec4 p, inout vec4 d)
 {
-    newRo = ro;
-
-    vec3  oc = ro - WormholeCenter();
-    float b  = dot(oc, rd);
-    if (b >= 0.0) return 0.0;               // ray diverges from the field
-    float c = dot(oc, oc) - WormholeBendRadius2();
-    if (c < 0.0)  return 0.0;               // camera already inside the field
-    float disc = b * b - c;
-    if (disc <= 0.0) return 0.0;            // never enters (defensive)
-
-    float tEnter = -b - sqrt(disc);
-    newRo = ro + rd * tEnter;
-    return tEnter;
+    vec4 n = SpaceNormal(p);
+    p -= SpaceSdf(p) * n;
+    vec4 q = d - n * dot(d, n);
+    float l = length(q);
+    // Degenerate case (d parallel to the normal, e.g. looking straight
+    // through the mouth from its exact center): keep d as-is. A pixel or
+    // two, and the next step re-snaps.
+    d = (l > 1e-6) ? q / l : d;
 }
 
-// ---------------------------------------------------------------------------
-// Shading
-// ---------------------------------------------------------------------------
-
-// Wormhole shading: the disc is black (nothing escapes the horizon) with a
-// hot photon-ring rim. *localDir is the outward local direction at the hit
-// (normalize(hitPos - center)); *rayDir is the (bent) ray direction at the
-// hit - grazing rays light up the rim.
-vec3 ShadeWormhole(vec3 localDir, vec3 rayDir)
+// Step limit for the 4D march: constant (0.1 * rMin) in the curved region -
+// fine enough to resolve the throat's curvature - and growing with distance
+// from the rim on the sheets, where the space is flat and big steps are safe.
+float SpaceStepLimit(vec4 p)
 {
-    vec3  n = normalize(localDir);
-    float grazing = 1.0 - max(dot(n, -rayDir), 0.0);   // 0 head-on, 1 grazing
+    return max(0.1 * WhRmin(), length(p.xyz) - WhRmaj());
+}
 
-    vec3 hot  = vec3(1.00, 0.80, 0.50);   // incandescent thin rim
-    vec3 cool = vec3(0.30, 0.50, 1.00);   // wide cool halo
-    return hot * pow(grazing, 8.0) * 1.30
-         + cool * pow(grazing, 3.0) * 0.30;
+// True when p sits on a flat sheet (|w| = rMin after the snap): the space
+// there is a flat 3D hyperplane, so a straight exact 3D path is valid for a
+// ray from p (and its 3D projection is the 4D ray itself - d.w = 0 on the
+// sheet).
+bool WhOnSheet(vec4 p)
+{
+    return abs(p.w) >= WhRmin() - 1e-4;
 }

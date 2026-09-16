@@ -17,3 +17,12 @@ vec3 SkyColor(vec3 rd)
     float h = clamp(rd.y * 0.5 + 0.5, 0.0, 1.0);
     return mix(vec3(0.78, 0.87, 1.0), vec3(0.28, 0.47, 0.78), h);
 }
+
+// The wormhole's two universes are tinted apart (the lower one warm, the
+// upper one as-is) so the player can tell which side of the throat they are
+// on - the sky and the distance fog it fades toward both pick up the tint
+// (see WhTubeMarch's universe latch in Raymarcher.comp).
+vec3 UniverseTint(int universe)
+{
+    return (universe < 0) ? vec3(1.0, 0.5, 0.5) : vec3(1.0);
+}

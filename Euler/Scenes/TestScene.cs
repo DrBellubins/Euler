@@ -14,14 +14,14 @@ public class TestScene : Scene
     
     private Freecam freecam = new();
     private Raymarcher raymarcher = null!;
+    private WorldCam worldCam = null!;
+    private WormholePrimitive wormhole;
 
     public override void Start()
     {
         freecam.Start();
         raymarcher = new Raymarcher(LoadGroundTexture(), LoadGroundTexture());
-
-        // The scene's ground is the raymarched FBM terrain (the plane family
-        // stays available for future scenes via AddPlane).
+        
         raymarcher.AddTerrain(new TerrainPrimitive(
             offset: new Vector3(0, -4, 0),
             amplitude: 7.5f,   // theoretical peak tops reach y ~= +3.5 (-4 + 7.5): the camera can dip below a peak
@@ -30,18 +30,31 @@ public class TestScene : Scene
             uvScale: new Vector2(0.5f, 0.5f),
             sunDirection: new Vector3(0.5f, 1.0f, 0.3f),
             sunIntensity: 0.8f));
-
-        // A wormhole mouth floating above the terrain: a black event horizon
-        // with light bending around it (photon ring + lensed halo). The
-        // camera starts at (0,0,-10) looking +Z, so (0,6,6) sits ahead and
-        // slightly above center; the horizon bottom (y = 4) clears the
-        // terrain's peak tops (~3.5).
-        raymarcher.AddWormhole(new WormholePrimitive(new Vector3(0, 6, 6), 2.0f));
+        
+        wormhole = new WormholePrimitive(new Vector3(0, 7, 6), rmaj: 2.0f, rmin: 0.8f);
+        raymarcher.AddWormhole(wormhole);
+        
+        worldCam = new WorldCam(
+            center: wormhole.Center,
+            pos:     new Vector4(0f, -6f, -16f, wormhole.Rmin),
+            forward: new Vector4(0f, 0f, 1f, 0f),
+            left:    new Vector4(-1f, 0f, 0f, 0f),
+            up:      new Vector4(0f, 1f, 0f, 0f));
+        
+        freecam.WorldCamEnabled = true;
     }
 
     public override void Update()
     {
         freecam.Update();
+        
+        worldCam.Update(
+            yawDelta:   -freecam.LookDelta.X * Freecam.LookSensitivity,
+            pitchDelta: -freecam.LookDelta.Y * Freecam.LookSensitivity,
+            move:       freecam.LocalMove * freecam.MoveSpeed,
+            wormhole);
+
+        freecam.SyncFromWorldCam(worldCam);
     }
     
     private static Texture2D LoadGroundTexture()
@@ -63,13 +76,23 @@ public class TestScene : Scene
         Raylib.BeginDrawing();
         Raylib.ClearBackground(Color.Black);
         
-        raymarcher.Draw(freecam.Camera);
+        raymarcher.Draw(freecam.Camera, worldCam);
 
         Raylib.DrawText($"Position: {freecam.Camera.Position}",
             0, 0, 24, Color.White);
         
         Raylib.DrawText($"Current speed mult: {freecam.CurrentSpeedMultiplier}",
             0, 28, 24, Color.White);
+
+        string universe = worldCam.Universe switch
+        {
+            1 => "upper universe",
+            -1 => "lower universe",
+            _ => "throat (between universes)"
+        };
+        
+        Raylib.DrawText($"Wormhole: {universe}  (w = {worldCam.Pos.W:F2})",
+            0, 56, 24, Color.White);
         
         Raylib.EndDrawing();
     }

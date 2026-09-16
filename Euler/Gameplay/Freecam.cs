@@ -16,7 +16,26 @@ public class Freecam
 
     public float CurrentSpeed;
     public float CurrentSpeedMultiplier = 1.0f;
-    
+
+    /// <summary>
+    /// When true the 3D yaw/pitch/position integration is skipped: a
+    /// <see cref="WorldCam"/> (4D, wormhole) owns the view, and this camera
+    /// is only the derived 3D HUD state (sync it with
+    /// <see cref="SyncFromWorldCam"/>). Look/move input is still captured in
+    /// <see cref="LookDelta"/> / <see cref="LocalMove"/> / <see cref="MoveSpeed"/>
+    /// for the 4D camera to consume.
+    /// </summary>
+    public bool WorldCamEnabled;
+
+    /// <summary>This frame's look delta in pixels (raw, unscaled).</summary>
+    public Vector2 LookDelta;
+
+    /// <summary>This frame's movement keys as (Forward, Left, Up) components, -1/0/+1.</summary>
+    public Vector3 LocalMove;
+
+    /// <summary>This frame's movement scale (speed * dt), world units per unit LocalMove.</summary>
+    public float MoveSpeed;
+
     private float yaw;
     private float pitch;
 
@@ -35,16 +54,16 @@ public class Freecam
         if (Input.FlyToggle())
             Input.CursorLocked = !Input.CursorLocked;
 
-        if (Input.CursorLocked)
+        LookDelta = Input.LookDelta;
+
+        if (Input.CursorLocked && !WorldCamEnabled)
         {
-            Vector2 look = Input.LookDelta;
+            yaw += LookDelta.X * LookSensitivity;
             
-            yaw += look.X * LookSensitivity;
-            
-            pitch = GMath.Clamp(pitch - look.Y * LookSensitivity,
+            pitch = GMath.Clamp(pitch - LookDelta.Y * LookSensitivity,
                 -GMath.ToRadians(MaxPitch), GMath.ToRadians(MaxPitch));
         }
-
+        
         Vector3 forward = new(
             MathF.Sin(yaw) * MathF.Cos(pitch),
             MathF.Sin(pitch),
@@ -61,15 +80,37 @@ public class Freecam
             CurrentSpeed = FastSpeed * CurrentSpeedMultiplier;
         else
             CurrentSpeed = SlowSpeed * CurrentSpeedMultiplier;
-        
-        if (Input.MoveForward()) Camera.Position += forward * (CurrentSpeed * dt);
-        if (Input.MoveBackward()) Camera.Position -= forward * (CurrentSpeed * dt);
-        if (Input.MoveLeft()) Camera.Position -= right * (CurrentSpeed * dt);
-        if (Input.MoveRight()) Camera.Position += right * (CurrentSpeed * dt);
 
-        if (Input.Jump()) Camera.Position += Camera.Up * (CurrentSpeed * dt);
-        if (Input.Crouch()) Camera.Position -= Camera.Up * (CurrentSpeed * dt);
+        // Captured in (Forward, Left, Up) basis components - consumed by the
+        // 3D integration below or, when WorldCamEnabled, by the scene's
+        // WorldCam (which owns its own basis).
+        LocalMove = new Vector3(
+            (Input.MoveForward() ? 1 : 0) - (Input.MoveBackward() ? 1 : 0),
+            (Input.MoveLeft() ? 1 : 0) - (Input.MoveRight() ? 1 : 0),
+            (Input.Jump() ? 1 : 0) - (Input.Crouch() ? 1 : 0));
+        MoveSpeed = CurrentSpeed * dt;
+
+        if (WorldCamEnabled)
+        {
+            // The 4D camera integrates look/move (the scene drives it); this
+            // 3D camera is only the derived HUD state (SyncFromWorldCam).
+            return;
+        }
+
+        if (LocalMove.X != 0) Camera.Position += forward * (LocalMove.X * MoveSpeed);
+        if (LocalMove.Y != 0) Camera.Position -= right * (LocalMove.Y * MoveSpeed);
+        if (LocalMove.Z != 0) Camera.Position += Camera.Up * (LocalMove.Z * MoveSpeed);
 
         Camera.Target = Camera.Position + forward;
+    }
+
+    /// <summary>
+    /// Replaces this 3D camera with the derived 3D state of a 4D
+    /// <paramref name="worldCam"/> (call after worldCam.Update when
+    /// <see cref="WorldCamEnabled"/>).
+    /// </summary>
+    public void SyncFromWorldCam(WorldCam worldCam)
+    {
+        Camera = worldCam.ToCamera3D(Camera.FovY);
     }
 }
