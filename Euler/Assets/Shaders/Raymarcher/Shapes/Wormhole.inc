@@ -48,11 +48,15 @@ vec3  WhCenter() { return WormholeData[0].xyz; }
 
 // Max throat-march steps per pixel. A full sheet-to-sheet crossing around
 // the inner wall is ~pi*(rMaj - rMin) + 2*rMin of arc; at the 0.1*rMin step
-// floor that is ~60 steps for the scene's sizing, so this covers a full
-// crossing plus a partial second loop. An exhausted ray falls back to the
-// exact 3D path (the driver), so the cap costs only a thin band of pixels,
-// not correctness.
-#define WH_MAX_STEPS 128
+// floor that is ~50-55 steps for the scene's sizing (rMaj=2, rMin=1: ~51),
+// and the flat-sheet steps only grow from there, so a single crossing needs
+// well under 80. 96 still leaves ~60% headroom (a crossing plus a partial
+// second loop); an exhausted ray falls back to the exact 3D path (the
+// driver), so the cap costs only a thin band of pixels, not correctness.
+// Kept modest on purpose: the per-step cost here is a few sqrt/dot (no scene
+// SDF), and the real per-pixel cost is the terrain march at the exit, which
+// the terrain's distance LOD (TERRAIN_LOD_*) keeps cheap.
+#define WH_MAX_STEPS 96
 
 // ---------------------------------------------------------------------------
 // 4D space geometry (the hypersurface the camera and rays live on)

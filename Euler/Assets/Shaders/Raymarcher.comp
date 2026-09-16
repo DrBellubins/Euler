@@ -364,7 +364,7 @@ void main()
         // .inc declares its own shade function; extend the dispatch when
         // adding a family).
         color = (family == FamilyTerrain)
-                ? ShadeTerrain(uv)
+                ? ShadeTerrain(uv, t)     // t = path length to hit -> normal LOD
                 : ShadePlane(uv);
 
         // Distance fog (universe-tinted, see Sky.inc).
