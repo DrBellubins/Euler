@@ -1,0 +1,413 @@
+// ------------------ WORMHOLE GEOMETRY ------------------
+// wormhole parameters
+// major radius = radius of wormhole + curvature at lip, minor radius = radius of curvature at wormhole lip
+const float r_maj = 1.4;
+// actual radius of hole is major - minor
+const float r_min = 0.6;
+// 3d space on each side is offset by r_min in the w axis
+
+// potential optimization: pass r_maj/r_min squared and compare it to p.xy . p.xy
+float wormhole_sdf(vec4 p, float r_maj, float r_min) {
+    if (length(p.xyz) > r_maj) {
+        // outside wormhole
+        return abs(p.w) - r_min;
+    } else {
+        vec4 rim_point = vec4(normalize(p.xyz / r_maj) * r_maj, 0.);
+        return length(rim_point - p) - r_min;
+    }
+}
+
+// 4d SDF of the wormhole. The 0-level hypersurface is the space the camera is embedded within.
+float space(vec4 p) {
+    return wormhole_sdf(p, r_maj, r_min);
+    //return p.w - r_min; // flat space, no wormhole
+}
+
+// project v1 onto v2
+vec4 proj(vec4 v1, vec4 v2) {
+    return v2 * dot(v1, v2);
+}
+
+
+// normalizes a ray into the space.
+// "Normalization" here means moving it to the nearest point within the 3d hypersurface
+// and constraining its direction to be normal to the hypersurface.
+// TODO: Using analytical normals it should be possible to do this in arbitrary geometries
+void space_normalize(inout vec4 p, inout vec4 dir) {
+    vec4 space_normal;
+    if (length(p.xyz) > r_maj) {
+        // outside wormhole
+        if(p.w > 0.) space_normal = vec4(vec3(0.), 1.); // top space
+        else space_normal = vec4(vec3(0.), -1.); // bottom space
+    } else {
+        // wormhole space
+        vec4 rim_point = vec4(normalize(p.xyz / r_maj) * r_maj,  0.);
+        space_normal = normalize(p - rim_point);
+    }
+    float space_d = space(p);
+    
+    // snap point back to the space
+    
+    p -= space_d * space_normal;
+    // constrain direction to surface of space
+    // subtract the projection of the direction onto the space's normal vector
+    // this is a single step of the graham-schmidt process
+    dir = normalize(dir - proj(dir, space_normal));
+}
+
+// Graham-Schmidt orthonormalization. https://en.wikipedia.org/wiki/Gram%E2%80%93Schmidt_process
+// Resulting matrix is orthogonal to the space normal and orthonormalized, but maintains its orientation as closely as possible.
+// TODO: Using analytical normals it should be possible to do this in arbitrary geometries
+mat4x4 space_orthonorm_gs( mat4x4 pos_basis) {
+    vec4 x_basis = pos_basis[0];
+    vec4 y_basis = pos_basis[1];
+    vec4 z_basis = pos_basis[2];
+    
+    vec4 p = pos_basis[3];
+    
+    vec4 space_normal;
+    if (length(p.xyz) > r_maj) {
+        // outside wormhole
+        if(p.w > 0.) space_normal = vec4(vec3(0.), 1.); // top space
+        else space_normal = vec4(vec3(0.), -1.); // bottom space
+    } else {
+        // wormhole space
+        vec4 rim_point = vec4(normalize(p.xyz / r_maj) * r_maj,  0.);
+        space_normal = normalize(p - rim_point);
+    }
+    float space_d = space(p);
+    
+    // snap point back to the space
+    p -= space_d * space_normal;
+    
+    // do the Graham Schmidt thing
+    x_basis = normalize(x_basis - proj(x_basis, space_normal));
+    y_basis = normalize(y_basis - proj(y_basis, space_normal) - proj(y_basis, x_basis));
+    z_basis = normalize(z_basis - proj(z_basis, space_normal) - proj(z_basis, x_basis) - proj(z_basis, y_basis));
+    
+    return mat4x4(x_basis, y_basis, z_basis, p);
+}
+
+// constrains length of raymarches based on space curvature.
+// this limits numerical errors as rays pass through the curved interior of the wormhole.
+float space_sdf(vec4 p) {
+    return max(0.1 * r_min, length(p.xyz) - r_maj);
+}
+
+
+// ------------------ STATE MANAGEMENT ------------------
+
+
+struct State
+{
+    bool init;          // 0
+    mat4x4 camera;      // 1..4
+    bool cam_ctl;       // 5
+    vec4 prev_iMouse;   // 6
+    
+} state;
+
+#define STATE_SIZE 7.
+
+void initState() {
+    state.init = true;
+    
+    // pointing along X axis, 3d position (-2, 0.5, 0.), in positive universe (w=r_min)
+    state.camera = mat4x4(vec4(1., 0.,0.,0.),
+                          vec4(0.,1.,0.,0.),
+                          vec4(0.,0.,1.,0.),
+                          vec4(-2.,0.5,0.,r_min));
+    state.cam_ctl = false;
+    state.prev_iMouse = vec4(0.);
+}
+
+vec4 serializeState(int idx){
+    if (idx == 0) return vec4(state.init?1.:0., vec3(0.));
+    if (idx == 1) return state.camera[0];
+    if (idx == 2) return state.camera[1];
+    if (idx == 3) return state.camera[2];
+    if (idx == 4) return state.camera[3];
+    if (idx == 5) return vec4(state.cam_ctl?1.:0., vec3(0.));
+    if (idx == 6) return state.prev_iMouse;
+    return vec4(0);
+}
+
+#define inputTextureState(i) texture(iChannel0, vec2(float(i) + 0.5, 0.5) / iResolution.xy)
+void deserializeState(sampler2D iChannel0, vec2 iResolution){
+    state.init = inputTextureState(0).x > 0.;
+    state.camera[0] = inputTextureState(1);
+    state.camera[1] = inputTextureState(2);
+    state.camera[2] = inputTextureState(3);
+    state.camera[3] = inputTextureState(4);
+    state.cam_ctl = inputTextureState(5).x > 0.;
+    state.prev_iMouse = inputTextureState(6);
+}
+
+
+// Buffer A holds camera/view state and manages movement/panning controls.
+
+#define keyboardTexture(coord) texture(iChannel1, (coord) / vec2(256.0, 3.0))
+
+
+
+#define KEY_A 65
+#define KEY_Q 81
+#define KEY_D 68
+#define KEY_E 69
+#define KEY_N 78
+#define KEY_R 82
+#define KEY_S 83
+#define KEY_W 87
+
+
+bool isKeyDown(int key)
+{
+    return keyboardTexture((vec2(0.5) + vec2(float(key), 0.0))).x > 0.5;
+}
+
+bool isKeyPressed(int key)
+{
+    return keyboardTexture((vec2(0.5) + vec2(float(key), 1.0))).x > 0.5;
+}
+
+
+
+
+void mainImage(out vec4 fragColor, in vec2 fragCoord)
+{
+    deserializeState(iChannel0, iResolution.xy);
+
+    //if(!KeyboardInput(iChannel1))
+    //state.timer+=min(1./5., iMouse.z<0.5?iTimeDelta*(10.*tc+1.-tb*4.):0.);
+
+    if (!state.init)
+    {
+        initState();
+    }
+
+
+    vec2 uv = (fragCoord / iResolution.xy) * 2. - 1.;
+
+    if (fragCoord.x < STATE_SIZE && fragCoord.y < 1.0) // state
+    {
+        float delta = iTimeDelta;
+        
+        if(iMouse.w > 0.5) { // clicked
+            state.cam_ctl = true;
+        } else if(iMouse.z > 0.5) { // dragged
+            vec2 imouse_delta = iMouse.xy - state.prev_iMouse.xy;
+            
+            float yaw_ang = imouse_delta.x * -0.003;
+            float pit_ang = imouse_delta.y * 0.003;
+            
+            mat4x4 yaw = mat4x4(vec4(cos(yaw_ang),  sin(yaw_ang), 0., 0.),
+                                vec4(-sin(yaw_ang), cos(yaw_ang), 0., 0.),
+                                vec4(0.,            0.,           1., 0.),
+                                vec4(0,             0.,           0., 1.));
+           
+                          
+            mat4x4 pitch = mat4x4(vec4(cos(pit_ang),  0,  sin(pit_ang), 0.),
+                                  vec4(0.,            1., 0.,           0.),
+                                  vec4(-sin(pit_ang), 0., cos(pit_ang), 0.),
+                                  vec4(0,             0., 0.,           1.));
+                                
+            state.camera = state.camera * yaw * pitch;
+            
+        }
+        
+        if(state.cam_ctl) {
+            // manual camera control
+            bool move_left = isKeyDown(KEY_A);
+            bool move_right = isKeyDown(KEY_D);
+            
+            
+            bool move_fwd = isKeyDown(KEY_W);
+            bool move_back = isKeyDown(KEY_S);
+            
+            bool move_up = isKeyDown(KEY_E);
+            bool move_down = isKeyDown(KEY_Q);
+            
+            vec4 move = vec4(float(move_fwd) - float(move_back), float(move_left) - float(move_right), float(move_up) - float(move_down), 0.);
+            
+            state.camera[3] += state.camera * move * delta;
+            
+        } else {
+            // automatically fly through wormhole
+            state.camera[3] += delta * state.camera[0] * sin(iTime * 0.6);
+        }
+        
+       
+        
+        state.camera = space_orthonorm_gs(state.camera);
+        state.prev_iMouse = iMouse;
+        
+        fragColor = serializeState(int(floor(fragCoord.x)));
+    }
+    else
+    {
+    fragColor = vec4(0.);
+    }
+}
+
+// Fork of "Simple wormhole" by A_Toaster. https://shadertoy.com/view/wfcXzj
+// 2025-06-07 16:45:42
+
+#define EPS 0.001
+#define MAX_DIST 100.
+
+float sdSphere(float r, vec4 p) {
+    return length(p) - r;
+}
+
+float sdBox( vec4 p, vec4 b )
+{
+    vec4 q = abs(p) - b;
+    return length(max(q,0.0)) + min(max(q.x,max(q.y,max(q.z,q.w))),0.0);
+}
+
+// flattened in the 4th dimension so it doesn't stick into the parallel universe :p
+float sdHyperEllipsoid(float r, vec4 p) {
+    return length(p.xyz) - r + abs(p.w) * 100.;
+}
+
+
+float scene(vec4 p) {
+    return min(
+        sdHyperEllipsoid(0.75, p - vec4(1., 2., 0., r_min)),
+        sdBox(p - vec4(2., 2., -0.75, -r_min), vec4(vec3(0.4), 0.1) + 0.1)
+    );
+ 
+}
+
+
+// TODO 3d normal calc. This doesn't work for objects inside the wormhole
+vec3 calcNormal( in vec4 p ) // for function f(p)
+{
+    const float h = 0.0001; // replace by an appropriate value
+    const vec2 k = vec2(1,-1);
+    return normalize( k.xyy*scene( vec4(p.xyz + k.xyy*h, p.w) ) + 
+                      k.yyx*scene( vec4(p.xyz + k.yyx*h, p.w) ) + 
+                      k.yxy*scene( vec4(p.xyz + k.yxy*h, p.w) ) + 
+                      k.xxx*scene( vec4(p.xyz + k.xxx*h, p.w) ) );
+}
+
+
+bool raymarch(vec4 ro, vec4 rd, int steps, out vec4 hit, out vec4 hit_rd) {
+    hit = ro;
+    hit_rd = rd;
+    for(; steps > 0; --steps) {
+        float d = min(scene(hit), space_sdf(hit));
+        hit += d * hit_rd;
+        space_normalize(hit, hit_rd); // this is the magic part, snaps the 4d position to the 3d hypersurface of the wormhole
+        if(d < EPS) {
+            return true;
+        }
+        if(d > MAX_DIST) {
+            return false;
+        }
+    }
+    return false;
+}
+
+
+// fov 1 = 90 degrees
+vec4 camera(vec2 uv_norm, mat4x4 orientation, float fov) {
+    //vec3 forward = orientation.x;
+    //vec3 up = orientation.z;
+    //vec3 left = orientation.y;
+    
+    //return left * fov * uv_norm.x + up * fov * uv_norm.y + forward;
+    return normalize(orientation * vec4(1.0, -uv_norm.x * fov, uv_norm.y * fov, 0.));
+}
+
+
+// Star Nest from https://www.shadertoy.com/view/XlfGRj
+#define iterations 17
+#define formuparam 0.53
+
+#define volsteps 20
+#define stepsize 0.1
+
+#define tile   0.850
+#define speed  0.010 
+
+#define brightness 0.0015
+#define darkmatter 0.300
+#define distfading 0.730
+#define saturation 0.850
+
+vec3 starnest(in vec3 from, in vec3 dir) {
+    float s=0.1,fade=1.;
+	vec3 v=vec3(0.);
+	for (int r=0; r<volsteps; r++) {
+		vec3 p=from+s*dir*.5;
+		p = abs(vec3(tile)-mod(p,vec3(tile*2.))); // tiling fold
+		float pa,a=pa=0.;
+		for (int i=0; i<iterations; i++) { 
+			p=abs(p)/dot(p,p)-formuparam; // the magic formula
+			a+=abs(length(p)-pa); // absolute sum of average change
+			pa=length(p);
+		}
+		float dm=max(0.,darkmatter-a*a*.001); //dark matter
+		a*=a*a; // add contrast
+		if (r>6) fade*=1.-dm; // dark matter, don't render near
+		//v+=vec3(dm,dm*.5,0.);
+		v+=fade;
+		v+=vec3(s,s*s,s*s*s*s)*a*brightness*fade; // coloring based on distance
+		fade*=distfading; // distance fading
+		s+=stepsize;
+	}
+	v=mix(vec3(length(v)),v,saturation); //color adjust
+	
+	return v * 0.01;
+}
+
+
+void mainImage( out vec4 fragColor, in vec2 fragCoord )
+{
+    deserializeState(iChannel0, iResolution.xy);
+    // Normalized pixel coordinates (from -1 to 1)
+    vec2 uv = fragCoord/iResolution.xy * vec2(2.) - vec2(1.);
+    uv = uv * vec2(iResolution.x / iResolution.y, 1.);
+    
+    float pitch = -sin(iTime) * 0.4;
+
+    //mat3x3 cam_orient = mat3x3(cos(pitch),0.0,-sin(pitch),
+    //                           0.0,1.0,0.0,
+    //                           sin(pitch),0.0,cos(pitch));
+
+    
+    vec4 cam_origin = state.camera[3];
+    
+    
+    vec4 rd = camera(uv, state.camera, 0.75);
+    
+    vec4 hit_pos;
+    vec4 hit_rd;
+    bool hit = raymarch(cam_origin, rd, 128, hit_pos, hit_rd);
+    
+    
+
+    // Time varying pixel color
+    vec3 col;
+    
+    if(hit) {
+        vec3 n = calcNormal(hit_pos);
+        col = vec3(0.5) + 0.2 * n;
+        
+    } else {
+        // add w so that the star nest is different in the two universes
+        // tiny iTime factor for twinkling when stationary
+        col = starnest(vec3(1., normalize(hit_pos.w) * 2., 3. + iTime * 0.0001), hit_rd.xyz);
+    
+        if(hit_pos.w < 0.) {
+            col *= vec3(1., 0.5, 0.5);
+        } else {
+            col *= vec3(0.5, 0.5, 1.);
+        }
+
+    }
+    // Output to screen
+    fragColor = vec4(col,1.0);
+    
+}

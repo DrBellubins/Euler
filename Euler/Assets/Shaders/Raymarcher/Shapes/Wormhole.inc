@@ -58,9 +58,13 @@ uniform vec4  WormholeData;
 const float WORMHOLE_BEND_RADIUS_FACTOR = 7.0;
 
 // Max deflection steps per pixel. Near-critical rays orbit the throat for
-// several turns before escaping or being captured, so the budget is
-// generous; typical bent rays need < 60 steps.
-#define WORMHOLE_MAX_BEND_STEPS 512
+// several turns before escaping or being captured and would like more;
+// typical bent rays need < 60 steps. The budget is kept modest on purpose:
+// the ring pixels that exhaust it are a thin band that would otherwise
+// dominate the compute dispatch (worst-case work per pixel), and an
+// exhausted ray falls back to an exact straight tail trace, so the cost
+// cap costs only a slightly softer photon ring, not correctness.
+#define WORMHOLE_MAX_BEND_STEPS 160
 
 vec3  WormholeCenter()     { return WormholeData.xyz; }
 float WormholeRadius()     { return WormholeData.w; }
@@ -98,11 +102,22 @@ float IntersectWormhole(vec3 ro, vec3 rd, out vec2 uv)
 // Bending field helpers (used by the driver's bent-ray loop)
 // ---------------------------------------------------------------------------
 
+// The driver's fog (ApplyFog in Raymarcher.comp) is 1 - exp(-0.010 * t),
+// which is >= 99% past ~460 units. A mouth farther away than that is
+// invisible through the fog, so the (expensive) bent pass is skipped
+// entirely: lensing stops rendering exactly when the wormhole is past the
+// fog distance. (The event horizon disc itself is still traced analytically
+// on the straight path - it stays "eternally black" and unfogged.)
+const float WORMHOLE_FOG_CULL_DIST  = 460.0;
+const float WORMHOLE_FOG_CULL_DIST2 = WORMHOLE_FOG_CULL_DIST * WORMHOLE_FOG_CULL_DIST;
+
 // Cheap gate for the driver's main(): true when the straight ray (ro, rd)
-// ever comes within the bend radius of the mouth.
+// ever comes within the bend radius of the mouth, and the camera is within
+// the fog cull distance of it (past that the mouth is invisible anyway).
 bool RayBendsAroundWormhole(vec3 ro, vec3 rd)
 {
     vec3 oc = ro - WormholeCenter();
+    if (dot(oc, oc) >= WORMHOLE_FOG_CULL_DIST2) return false;  // mouth lost in fog
     float b = dot(oc, rd);
     // Closest point on the ray (t >= 0) to the mouth center.
     vec3 closest = (b < 0.0) ? oc : (oc + rd * b);

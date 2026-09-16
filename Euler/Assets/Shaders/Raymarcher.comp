@@ -172,22 +172,53 @@ void main()
     {
         // ------------------------------------------------------------------
         // Bent-ray trace: the "non-Euclidean" extension point of the driver
-        // header - Dir is bent between IntersectScene() steps (see
-        // Wormhole.inc for the field physics). Only rays passing within
-        // WORMHOLE_BEND_RADIUS of the mouth enter this path; the rest of
-        // the screen stays on the exact analytic trace below.
+        // header - Dir is bent between steps (see Wormhole.inc for the
+        // field physics). Only rays passing within WORMHOLE_BEND_RADIUS of
+        // the mouth enter this path; the rest of the screen stays on the
+        // exact analytic trace below.
+        //
+        // COST MODEL (why the loop is structured this way): the terrain
+        // family is a FBM heightfield march - the most expensive thing in
+        // this shader - so a full IntersectScene() is NOT run per bend
+        // step. Per step we test only the cheap analytic pieces:
+        //   - horizon capture (r <= Rs, plus exact sphere entry in the
+        //     step),
+        //   - planes (analytic, bounded by MAX_PLANES),
+        //   - terrain, but only when the step segment can even reach the
+        //     terrain's ceiling plane (y = terrainTop), which requires
+        //     dir.y < 0 and the plane crossing within dt - and that march
+        //     is CACHED: a surface point found ahead of the ray is
+        //     remembered and re-verified cheaply (along-ray distance +
+        //     perpendicular offset) instead of re-marched every step.
+        // The full IntersectScene() runs exactly once, when the ray
+        // escapes the field or the step budget is exhausted - the scene
+        // is static, so no surface can "move into" the ray mid-field.
         // ------------------------------------------------------------------
         vec3 pos = ray.Origin;
         vec3 dir = ray.Dir;
         float pathLen = WormholeBendPreflight(ray.Origin, ray.Dir, pos);
+
+        // Cached terrain hit for the per-step check below (see the terrain
+        // section of the loop for the re-verification logic).
+        vec3 terrainHitPos  = vec3(0.0);
+        vec2 terrainHitUv   = vec2(0.0);
+        bool haveTerrainHit = false;
+
+        // The terrain's global maximum (Offset.y + Amplitude; the true max
+        // is slightly lower because Fbm < 1 and HillShape < 1). Same
+        // bound IntersectTerrain() uses for its direction cull.
+        float terrainTop = (TerrainEnabled > 0)
+                           ? TerrainData[0].y + TerrainData[1].x
+                           : -1e20;
 
         for (int i = 0; i < WORMHOLE_MAX_BEND_STEPS && !hit; i++)
         {
             vec3  dc = pos - WormholeCenter();
             float r  = length(dc);
 
-            // Captured by the event horizon: black disc (ShadeWormhole adds
-            // the photon-ring rim).
+            // Captured by the event horizon (camera already inside, or a
+            // spiral crossed it between steps): black disc (ShadeWormhole
+            // adds the photon-ring rim).
             if (r <= WormholeRadius())
             {
                 family = FamilyWormhole;
@@ -198,28 +229,98 @@ void main()
                 break;
             }
 
-            // Closest straight scene hit from here (the race includes the
-            // horizon sphere itself).
+            // Adaptive step: dt = 0.1 * r is a constant ANGLE (0.1 rad of
+            // arc) at any radius - fine enough at the throat for orbit
+            // fidelity, and 1.0 world units far out where the field is
+            // weak, so a full crossing of the field costs ~30 steps
+            // instead of ~150. Capture is exact anyway (analytic sphere
+            // test below), so the floor can be coarse.
+            float dt = clamp(0.1 * r, 0.1, 1.0);
+
+            // Exact horizon entry within this step (analytic, cheap).
             vec2  tuv;
-            float th;
-            int   tfam;
-            bool  hasHit = IntersectScene(Ray(pos, dir), tuv, th, tfam);
-
-            // Adaptive step: ~0.05 rad of deflection per step near the
-            // throat (where orbits are tight), up to 0.35 world units far
-            // out (where the field is weak).
-            float dt = max(min(0.35, 0.05 * r * r / WormholeRadius()), 1e-4);
-
-            if (hasHit && th <= dt)
+            float th = IntersectWormhole(pos, dir, tuv);
+            if (th > 0.0 && th <= dt)
             {
-                // A scene surface lies before the next bend: consume it.
-                family = tfam;
-                uv     = tuv;
+                family = FamilyWormhole;
+                uv     = vec2(0.0);
                 t      = pathLen + th;
                 hitPos = pos + dir * th;
                 skyDir = dir;
                 hit    = true;
                 break;
+            }
+
+            // Planes (analytic, cheap): consume any hit within this step.
+            for (int p = 0; p < MAX_PLANES; p++)
+            {
+                if (p >= PlaneCount) break;
+                vec2 pu;
+                float ph = IntersectPlane(pos, dir, p, pu);
+                if (ph > 0.0 && ph <= dt)
+                {
+                    family = FamilyPlane;
+                    uv     = pu;
+                    t      = pathLen + ph;
+                    hitPos = pos + dir * ph;
+                    skyDir = dir;
+                    hit    = true;
+                    break;
+                }
+            }
+            if (hit) break;
+
+            // Terrain: march the heightfield only when the step segment
+            // can reach the surface. The surface never rises above
+            // terrainTop, so a hit within [0, dt] requires the segment to
+            // cross the plane y = terrainTop within the step (or start
+            // below it, where a hit can't be ruled out cheaply).
+            //
+            // The march is the most expensive call in this loop, so its
+            // result is cached: once it finds a surface point ahead of the
+            // ray, later steps only verify the (slowly bending) ray still
+            // passes through that remembered point and re-march only when
+            // it no longer does.
+            if (TerrainEnabled > 0 && dir.y < 0.0)
+            {
+                if (pos.y < terrainTop || (pos.y - terrainTop) <= -dir.y * dt)
+                {
+                    vec2  ttuv = terrainHitUv;
+                    float tth  = -1.0;
+                    if (haveTerrainHit)
+                    {
+                        // Cheap re-verification of the cached surface point:
+                        // it is still the hit iff the ray passes within
+                        // tolerance of it (tolerance grows with distance:
+                        // a few degrees of accumulated bend + march epsilon).
+                        vec3  v    = terrainHitPos - pos;
+                        float s    = dot(v, dir);
+                        float perp = length(cross(dir, v));
+                        if (s > 0.0 && perp <= 0.10 + 0.05 * s)
+                            tth = s;
+                    }
+                    if (tth < 0.0)
+                    {
+                        // No valid cache: full march; remember the result.
+                        tth = IntersectTerrain(pos, dir, ttuv);
+                        haveTerrainHit = tth > 0.0;
+                        if (haveTerrainHit)
+                        {
+                            terrainHitPos = pos + dir * tth;
+                            terrainHitUv  = ttuv;
+                        }
+                    }
+                    if (tth > 0.0 && tth <= dt)
+                    {
+                        family = FamilyTerrain;
+                        uv     = ttuv;
+                        t      = pathLen + tth;
+                        hitPos = pos + dir * tth;
+                        skyDir = dir;
+                        hit    = true;
+                        break;
+                    }
+                }
             }
 
             pos += dir * dt;
