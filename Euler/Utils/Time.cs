@@ -7,6 +7,9 @@ public class Time
     public static double time;
     
     private static double deltaTime;
+    
+    public static double DeltaTimeRaw => deltaTime;
+    
     public static double DeltaTime
     {
         get

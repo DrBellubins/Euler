@@ -24,19 +24,19 @@ public class TestScene : Scene
         
         raymarcher.AddTerrain(new TerrainPrimitive(
             offset: new Vector3(0, -4, 0),
-            amplitude: 7.5f,   // theoretical peak tops reach y ~= +3.5 (-4 + 7.5): the camera can dip below a peak
+            amplitude: 12.5f,
             frequency: 0.04f,
             octaves: 5,
             uvScale: new Vector2(0.5f, 0.5f),
             sunDirection: new Vector3(0.5f, 1.0f, 0.3f),
             sunIntensity: 0.8f));
         
-        wormhole = new WormholePrimitive(new Vector3(0, 7, 6), rmaj: 2.0f, rmin: 0.8f);
+        wormhole = new WormholePrimitive(new Vector3(0, 4, 6), rmaj: 2.0f, rmin: 1.0f);
         raymarcher.AddWormhole(wormhole);
         
         worldCam = new WorldCam(
             center: wormhole.Center,
-            pos:     new Vector4(0f, -6f, -16f, wormhole.Rmin),
+            pos:     new Vector4(0f, 5f, -16f, wormhole.Rmin),
             forward: new Vector4(0f, 0f, 1f, 0f),
             left:    new Vector4(-1f, 0f, 0f, 0f),
             up:      new Vector4(0f, 1f, 0f, 0f));
@@ -79,11 +79,14 @@ public class TestScene : Scene
         
         raymarcher.Draw(freecam.Camera, worldCam);
 
-        Raylib.DrawText($"Position: {freecam.Camera.Position}",
+        Raylib.DrawText($"FPS: {1f / (float)Time.DeltaTimeRaw}",
             0, 0, 24, Color.White);
         
-        Raylib.DrawText($"Current speed mult: {freecam.CurrentSpeedMultiplier}",
+        Raylib.DrawText($"Position: {freecam.Camera.Position}",
             0, 28, 24, Color.White);
+        
+        Raylib.DrawText($"Current speed mult: {freecam.CurrentSpeedMultiplier}",
+            0, 50, 24, Color.White);
 
         string universe = worldCam.Universe switch
         {
