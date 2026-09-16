@@ -48,14 +48,14 @@ public class Raymarcher
     /// <see cref="InternalSize"/>; the display pass always runs at the full
     /// window size.
     /// </summary>
-    public float RenderScale { get; set; } = 1.0f;
+    public float RenderScale { get; set; } = 0.5f;
 
     /// <summary>
     /// Display output view: 0 final (edge-aware + optional sharpen),
     /// 1 nearest, 2 plain bilinear, 3 edge-aware (no sharpen), 4 distance,
     /// 5 normal, 6 family id, 7 edge-rejection mask.
     /// </summary>
-    public int DebugMode { get; set; }
+    public int DebugMode { get; set; } = 1;
 
     /// <summary>Depth-weight falloff: exp(-relDelta * DepthScale) with the
     /// relative delta |d - dRef| / max(1, min(d, dRef)).</summary>

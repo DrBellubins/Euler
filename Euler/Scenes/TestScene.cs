@@ -18,7 +18,7 @@ public class TestScene : Scene
     private WormholePrimitive wormhole;
 
     // Live-upscale control cycles (see Raymarcher for semantics).
-    private static readonly float[] RenderScaleCycle = { 1.0f, 0.75f, 0.67f, 0.5f };
+    private static readonly float[] RenderScaleCycle = { 0.5f, 0.75f, 1.0f };
     private static readonly float[] DepthScaleCycle = { 5f, 10f, 25f, 50f, 100f };
     private static readonly float[] NormalExponentCycle = { 1f, 2f, 4f, 8f, 16f, 32f };
 
@@ -70,12 +70,16 @@ public class TestScene : Scene
         // --- Raymarcher upscale controls (live A/B of quality/perf) ---
         if (Input.IsKeyPressed(KeyboardKey.F1))
             raymarcher.RenderScale = NextInCycle(raymarcher.RenderScale, RenderScaleCycle);
+        
         if (Input.IsKeyPressed(KeyboardKey.F2))
             raymarcher.DebugMode = (raymarcher.DebugMode + 1) % DebugModeNames.Length;
+        
         if (Input.IsKeyPressed(KeyboardKey.F4))
             raymarcher.DepthScale = NextInCycle(raymarcher.DepthScale, DepthScaleCycle);
+        
         if (Input.IsKeyPressed(KeyboardKey.F5))
             raymarcher.NormalExponent = NextInCycle(raymarcher.NormalExponent, NormalExponentCycle);
+        
         if (Input.IsKeyPressed(KeyboardKey.F7))
             raymarcher.Sharpen = raymarcher.Sharpen <= 0f ? 0.5f : 0f;
         
