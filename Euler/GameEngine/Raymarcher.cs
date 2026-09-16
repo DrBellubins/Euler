@@ -13,13 +13,20 @@ namespace Euler.GameEngine;
 /// (<see cref="WormholePrimitive"/>). Scene contents are
 /// modular shape families - see the includes in <c>Raymarcher.comp</c>.
 ///
-/// Pipeline (compute):
+/// Pipeline (compute + edge-aware upscale):
 /// <list type="number">
-/// <item>A compute shader (<c>Raymarcher.comp</c>) raymarches EVERY pixel in
-/// parallel - one work item per pixel - and writes one packed RGBA8 uint per
-/// pixel into an SSBO (binding point 0).</item>
+/// <item>A compute shader (<c>Raymarcher.comp</c>) raymarches EVERY pixel of
+/// the INTERNAL resolution (<see cref="RenderScale"/> x the window) in
+/// parallel - one work item per pixel - and writes 3 uints per pixel into an
+/// SSBO (binding point 0): packed RGBA8 color, the hit's total path length
+/// (float bits; a large sentinel on a miss) and a 3x8-bit shaded world normal
+/// with an 8-bit family ID in the top byte.</item>
 /// <item>A display shader (<c>RaymarcherDisplay.fs</c>) draws one full-screen
-/// quad that reads its pixel back from that SSBO and writes it to the screen.</item>
+/// quad at NATIVE window resolution. Each output pixel gathers the 2x2
+/// neighborhood of low-res texels from that SSBO and reconstructs its color
+/// with edge-aware (distance/normal/family gated) bilinear weights - a
+/// single-frame spatial upscaler. <see cref="DebugMode"/> switches the output
+/// to analysis views (nearest, bilinear, distance, normal, id, edge mask).</item>
 /// </list>
 ///
 /// Both stages are loaded through <see cref="Resource.LoadShader"/>, so the
@@ -29,6 +36,42 @@ namespace Euler.GameEngine;
 public class Raymarcher
 {
     public const int MaxPlanes = 8;
+
+    // -------------------------------------------------------------------
+    // Upscale settings (live-tunable; the semantics live in
+    // RaymarcherDisplay.fs)
+    // -------------------------------------------------------------------
+
+    /// <summary>
+    /// Internal render scale: 1.0 = native window resolution, 0.5 = quarter
+    /// the raymarched pixels. The expensive compute pass runs at
+    /// <see cref="InternalSize"/>; the display pass always runs at the full
+    /// window size.
+    /// </summary>
+    public float RenderScale { get; set; } = 1.0f;
+
+    /// <summary>
+    /// Display output view: 0 final (edge-aware + optional sharpen),
+    /// 1 nearest, 2 plain bilinear, 3 edge-aware (no sharpen), 4 distance,
+    /// 5 normal, 6 family id, 7 edge-rejection mask.
+    /// </summary>
+    public int DebugMode { get; set; }
+
+    /// <summary>Depth-weight falloff: exp(-relDelta * DepthScale) with the
+    /// relative delta |d - dRef| / max(1, min(d, dRef)).</summary>
+    public float DepthScale { get; set; } = 25.0f;
+
+    /// <summary>Normal-weight pow exponent (higher = sharper normal gating).</summary>
+    public float NormalExponent { get; set; } = 8.0f;
+
+    /// <summary>Weight for taps of a different (non-sky) family (0 = hard cut).</summary>
+    public float CrossIdPenalty { get; set; } = 0.05f;
+
+    /// <summary>Weight for sky<->geometry mixing (0 = hard separation; keep it).</summary>
+    public float SkyReject { get; set; }
+
+    /// <summary>Mild unsharp amount applied relative to plain bilinear (0 = off).</summary>
+    public float Sharpen { get; set; }
 
     private const string ComputeShaderPath = "Assets/Shaders/Raymarcher.comp";
     private const string DisplayShaderPath = "Assets/Shaders/RaymarcherDisplay.fs";
@@ -55,7 +98,7 @@ public class Raymarcher
     private const int TerrainTexUnit = 1;
 
     /// <summary>SSBO binding point shared by the compute and display stages.</summary>
-    private const uint PixelBufferBinding = 0;
+    private const uint OutputBufferBinding = 0;
 
     private readonly Shader _computeShader;
     private readonly Shader _displayShader;
@@ -72,10 +115,12 @@ public class Raymarcher
     private readonly float[] _wormholeData = new float[8];
     private bool _hasWormhole;
 
-    // Output SSBO: one packed RGBA8 uint per pixel (W*H*4 bytes), bound to
-    // PixelBufferBinding for both programs.
-    private uint _pixelBuffer;
-    private int _pixelBufferCount;         // number of pixels the buffer covers
+    // Output SSBO: 3 uints per INTERNAL-resolution pixel (12 bytes) -
+    // [0] packed RGBA8 color, [1] hit path length (float bits; DIST_SKY on a
+    // miss), [2] 3x8-bit shaded normal | 8-bit family id - bound to
+    // OutputBufferBinding for both programs.
+    private uint _outputBuffer;
+    private int _outputBufferPixels;       // number of pixels the buffer covers
 
     // Compute shader uniform locations.
     private int _locResolution;
@@ -91,8 +136,15 @@ public class Raymarcher
     private int _locWormholeData;
     private int _locWormholeCam;
 
-    // Display shader uniform locations.
+    // Display (upscale) shader uniform locations.
     private int _locDisplayResolution;
+    private int _locLowRes;
+    private int _locDebugMode;
+    private int _locDepthScale;
+    private int _locNormalExponent;
+    private int _locCrossIdPenalty;
+    private int _locSkyReject;
+    private int _locSharpen;
 
     public Raymarcher(Texture2D planeTexture, Texture2D terrainTexture)
     {
@@ -117,13 +169,36 @@ public class Raymarcher
         _locWormholeData    = Raylib.GetShaderLocation(_computeShader, "WormholeData");
         _locWormholeCam     = Raylib.GetShaderLocation(_computeShader, "WormholeCam");
         _locDisplayResolution = Raylib.GetShaderLocation(_displayShader, "Resolution");
+        _locLowRes = Raylib.GetShaderLocation(_displayShader, "LowRes");
+        _locDebugMode = Raylib.GetShaderLocation(_displayShader, "DebugMode");
+        _locDepthScale = Raylib.GetShaderLocation(_displayShader, "DepthScale");
+        _locNormalExponent = Raylib.GetShaderLocation(_displayShader, "NormalExponent");
+        _locCrossIdPenalty = Raylib.GetShaderLocation(_displayShader, "CrossIdPenalty");
+        _locSkyReject = Raylib.GetShaderLocation(_displayShader, "SkyReject");
+        _locSharpen = Raylib.GetShaderLocation(_displayShader, "Sharpen");
 
         // A single white pixel is all the full-screen quad needs.
         Image img = Raylib.GenImageColor(1, 1, Color.White);
         _quadTex = Raylib.LoadTextureFromImage(img);
         Raylib.UnloadImage(img);
 
-        CreatePixelBuffer(Engine.ScreenWidth, Engine.ScreenHeight);
+        CreateOutputBuffer(Engine.ScreenWidth, Engine.ScreenHeight);
+    }
+
+    /// <summary>
+    /// The INTERNAL resolution <see cref="Draw"/> dispatches the compute pass
+    /// at, for the current <see cref="RenderScale"/> (minimum 1x1 so a 0 or
+    /// negative scale degrades to the smallest possible buffer instead of
+    /// crashing the dispatch).
+    /// </summary>
+    public (int Width, int Height) InternalSize
+    {
+        get
+        {
+            int w = Math.Max(1, (int)MathF.Round(Engine.ScreenWidth * RenderScale));
+            int h = Math.Max(1, (int)MathF.Round(Engine.ScreenHeight * RenderScale));
+            return (w, h);
+        }
     }
 
     /// <summary>Adds a plane (up to <see cref="MaxPlanes"/>).</summary>
@@ -164,10 +239,12 @@ public class Raymarcher
     {
         int width = Engine.ScreenWidth;
         int height = Engine.ScreenHeight;
+        (int iw, int ih) = InternalSize;
 
-        // Recreate the pixel buffer if the framebuffer size changed.
-        if (_pixelBufferCount != width * height)
-            CreatePixelBuffer(width, height);
+        // Recreate the output buffer if the INTERNAL size changed (a new
+        // RenderScale, or a window resize).
+        if (_outputBufferPixels != iw * ih)
+            CreateOutputBuffer(iw, ih);
 
         for (int i = 0; i < _planeCount; i++)
             _planes[i].WriteInto(_planeData, i);
@@ -204,8 +281,11 @@ public class Raymarcher
         // SetShaderValue* enables the compute program before uploading (the
         // uniform state lives on the program), so the plain high-level API
         // works for compute shaders too.
+        //
+        // Resolution is the INTERNAL size: the compute pass raymarches the
+        // low-res image, the display pass maps back up to the window.
         Raylib.SetShaderValue(_computeShader, _locResolution,
-            new Vector2(width, height), ShaderUniformDataType.Vec2);
+            new Vector2(iw, ih), ShaderUniformDataType.Vec2);
         SetCameraMatrix(camera);
         Raylib.SetShaderValue(_computeShader, _locFocal,
             1f / MathF.Tan(GMath.ToRadians(camera.FovY) * 0.5f), ShaderUniformDataType.Float);
@@ -224,9 +304,10 @@ public class Raymarcher
             Raylib.SetShaderValueV(_computeShader, _locWormholeData, _wormholeData, ShaderUniformDataType.Vec4, 2);
 
         // Grid rounded up to whole workgroups; the shader guards the tail.
+        // (INTERNAL size - the whole point of RenderScale.)
         Rlgl.ComputeShaderDispatch(
-            (uint)((width + WorkGroupSize - 1) / WorkGroupSize),
-            (uint)((height + WorkGroupSize - 1) / WorkGroupSize),
+            (uint)((iw + WorkGroupSize - 1) / WorkGroupSize),
+            (uint)((ih + WorkGroupSize - 1) / WorkGroupSize),
             1);
 
         // The dispatch's SSBO writes must complete before the display
@@ -235,13 +316,23 @@ public class Raymarcher
         RL.MemoryBarrierShaderStorageBuffer();
 
         // ---------------------------------------------------------------
-        // Stage 2 - display: blit the pixel SSBO to the screen.
+        // Stage 2 - display: edge-aware upscale of the output SSBO to the
+        // full window resolution (see RaymarcherDisplay.fs).
         // ---------------------------------------------------------------
         Raylib.BeginShaderMode(_displayShader);
         Raylib.SetShaderValue(_displayShader, _locDisplayResolution,
             new Vector2(width, height), ShaderUniformDataType.Vec2);
+        Raylib.SetShaderValue(_displayShader, _locLowRes,
+            new Vector2(iw, ih), ShaderUniformDataType.Vec2);
+        Raylib.SetShaderValue(_displayShader, _locDebugMode, DebugMode, ShaderUniformDataType.Int);
+        Raylib.SetShaderValue(_displayShader, _locDepthScale, DepthScale, ShaderUniformDataType.Float);
+        Raylib.SetShaderValue(_displayShader, _locNormalExponent, NormalExponent, ShaderUniformDataType.Float);
+        Raylib.SetShaderValue(_displayShader, _locCrossIdPenalty, CrossIdPenalty, ShaderUniformDataType.Float);
+        Raylib.SetShaderValue(_displayShader, _locSkyReject, SkyReject, ShaderUniformDataType.Float);
+        Raylib.SetShaderValue(_displayShader, _locSharpen, Sharpen, ShaderUniformDataType.Float);
 
-        // One full-screen quad; the display shader does the actual pixel read.
+        // One full-screen quad; the display shader does the actual 2x2
+        // neighborhood gather and edge-aware reconstruction.
         Raylib.DrawTextureRec(_quadTex,
             new Rectangle(0, 0, width, height),
             Vector2.Zero, Color.White);
@@ -253,10 +344,10 @@ public class Raymarcher
     {
         Raylib.UnloadShader(_computeShader);
         Raylib.UnloadShader(_displayShader);
-        if (_pixelBuffer != 0)
+        if (_outputBuffer != 0)
         {
-            Rlgl.UnloadShaderBuffer(_pixelBuffer);
-            _pixelBuffer = 0;
+            Rlgl.UnloadShaderBuffer(_outputBuffer);
+            _outputBuffer = 0;
         }
         Raylib.UnloadTexture(_planeTex);
         Raylib.UnloadTexture(_terrainTex);
@@ -264,24 +355,25 @@ public class Raymarcher
     }
 
     /// <summary>
-    /// (Re)creates the pixel SSBO for a <paramref name="width"/>x<paramref name="height"/>
-    /// framebuffer and binds it to <see cref="PixelBufferBinding"/>. Binding
-    /// points are context-global GL state, so the single bind makes the buffer
-    /// visible to BOTH the compute and the display program without any
-    /// per-program uniform.
+    /// (Re)creates the output SSBO for a <paramref name="width"/>x<paramref name="height"/>
+    /// INTERNAL resolution and binds it to <see cref="OutputBufferBinding"/>.
+    /// Binding points are context-global GL state, so the single bind makes
+    /// the buffer visible to BOTH the compute and the display program without
+    /// any per-program uniform.
     /// </summary>
-    private void CreatePixelBuffer(int width, int height)
+    private void CreateOutputBuffer(int width, int height)
     {
-        if (_pixelBuffer != 0)
+        if (_outputBuffer != 0)
         {
-            Rlgl.UnloadShaderBuffer(_pixelBuffer);
-            _pixelBuffer = 0;
+            Rlgl.UnloadShaderBuffer(_outputBuffer);
+            _outputBuffer = 0;
         }
 
-        // One uint (packed RGBA8) per pixel; raylib zero-clears the buffer.
-        _pixelBuffer = RL.LoadShaderBuffer(width * height * 4);
-        Rlgl.BindShaderBuffer(_pixelBuffer, PixelBufferBinding);
-        _pixelBufferCount = width * height;
+        // 3 uints (12 bytes) per pixel: color / distance / normal+id;
+        // raylib zero-clears the buffer.
+        _outputBuffer = RL.LoadShaderBuffer(width * height * 12);
+        Rlgl.BindShaderBuffer(_outputBuffer, OutputBufferBinding);
+        _outputBufferPixels = width * height;
     }
 
     /// <summary>

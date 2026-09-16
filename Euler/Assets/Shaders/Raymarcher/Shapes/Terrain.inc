@@ -12,14 +12,17 @@
 // It follows the same contract as the other shape families:
 //
 //     data layout + uniforms  ->  IntersectTerrain(ro, rd, out uv)
-//                                 ->  ShadeTerrain(uv, dist)
+//                                 ->  ShadeTerrain(uv, dist, nrm)
 //
-// (Terrain's shade takes one argument beyond the plane pattern: the hit's
+// (Terrain's shade takes two arguments beyond the plane pattern: the hit's
 // path length `dist`, which drives the distance LOD of the FBM octaves - see
-// TERRAIN_LOD_* below. IntersectTerrain's signature is unchanged.)
+// TERRAIN_LOD_* below - and `nrm`, the finite-difference normal the driver's
+// IntersectScene latched for the winning ray. IntersectTerrain's signature
+// is unchanged.)
 //
 // uv is the hit's XZ in the terrain's LOCAL frame (world units, UNTILED);
-// ShadeTerrain() does the tiling, the normal and the lighting.
+// ShadeTerrain() does the tiling and the lighting (the normal arrives from
+// the driver, see its header).
 //
 // NOTE: no #version directive here - included files must never carry one;
 // #version must remain the first line of the main (expanding) shader.
@@ -262,12 +265,14 @@ float IntersectTerrain(vec3 ro, vec3 rd, out vec2 uv)
 
 // Terrain shading: tiled texture + lambertian sun, using the finite-
 // difference normal so the hills read as 3D. *uv is the LOCAL xz, world
-// units, untiled (see IntersectTerrain). `dist` is the path length to the
-// hit (the camera distance for a straight ray) and drives the normal's
-// octave LOD falloff, so far hits shade with cheaper normals.
-vec3 ShadeTerrain(vec2 localXz, float dist)
+// units, untiled (see IntersectTerrain). `nrm` is the finite-difference
+// normal the driver's IntersectScene latched when the terrain won the race
+// (same inputs as the TerrainNormal call this replaces: world xz + path
+// length) - computing it there means the upscaler and the shading share ONE
+// normal per hit instead of evaluating it twice.
+vec3 ShadeTerrain(vec2 localXz, float dist, vec3 nrm)
 {
-    vec3 n = TerrainNormal(localXz + TerrainData[0].xz, dist);
+    vec3 n = nrm;
 
     vec4 sd = TerrainData[2];
     float len = length(sd.xyz);

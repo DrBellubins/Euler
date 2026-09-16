@@ -1,8 +1,12 @@
-// Compute stage: raymarches the scene for EVERY pixel in parallel (one work
-// item per pixel) and writes one packed RGBA8 uint per pixel into the shared
-// pixel buffer (SSBO, binding 0). The display stage (RaymarcherDisplay.fs)
-// then blits that buffer to the screen, so the fragment pipeline only
-// performs a 1:1 buffer read.
+// Compute stage: raymarches the scene for EVERY pixel of the INTERNAL
+// resolution in parallel (one work item per pixel) and writes 3 uints per
+// pixel into the shared output buffer (SSBO, binding 0):
+//   [0] packed RGBA8 color
+//   [1] float bitcast of the hit's total path length (DIST_SKY on a miss)
+//   [2] 3x8-bit shaded world normal | 8-bit family id (top byte)
+// The display stage (RaymarcherDisplay.fs) then EDGE-AWARE UPSCALES that
+// buffer to the full window resolution (2x2 neighborhood weighted by the
+// distance/normal/family signals) - see that file for the weighting.
 //
 // This file is the raymarcher's DRIVER. It owns the per-pixel ray, the
 // camera/ray uniforms, the output buffer and the overall flow:
@@ -25,6 +29,11 @@
 //   - Raytraced reflections: march a SECOND ray through IntersectScene()
 //     in the shading step (e.g. reflect(ray.Dir, <hit normal>)), and mix
 //     its color into the surface color.
+//   - Upscaler guidance: IntersectScene() latches the winner's world-space
+//     shading normal too (each family latches its normal in the same block
+//     that latches its t/uv - a farther hit must never clobber it); main()
+//     packs normal + family id + path length into the SSBO stride for the
+//     display stage's edge-aware 2x2 upscaler.
 //   - 4D objects / non-Euclidean geometry: DONE (wormhole) - see the
 //     wormhole branch of main(): a 4D-authoritative camera (WormholeCam), a
 //     per-pixel gate (does this ray enter the mouth?), an analytic pre-test
@@ -67,12 +76,23 @@ uniform vec2  Resolution;            // framebuffer size in pixels
 uniform mat4  CamToWorld;            // camera space (y up, -z forward) -> world
 uniform float Focal;                 // 1 / tan(fovY * 0.5), precomputed in C#
 
-// One packed RGBA8 uint per screen pixel, shared with the display stage
-// (std430 uint array: 4-byte stride, no padding).
+// 3 uints per INTERNAL-resolution pixel, shared with the display stage
+// (std430 uint array: 4-byte stride, no padding). Layout (see
+// RaymarcherDisplay.fs for how the upscaler consumes it):
+//   [0] packed RGBA8 color
+//   [1] float bitcast of the hit's total path length (DIST_SKY on a miss)
+//   [2] 3x8-bit shaded world normal ([-1,1] -> [0,255]) | 8-bit family id
+//       in the top byte (0 = sky, 1 = plane, 2 = terrain; = family + 1)
 layout(std430, binding = 0) buffer Pixels
 {
     uint data[];
 } pixelBuf;
+
+// Distance sentinel for a sky/miss pixel: a finite float (NOT +inf) so the
+// display stage's relative-depth comparison |d - dRef| / min(d, dRef) stays
+// total-ordered - a miss against any real hit gives a huge delta (rejected),
+// a miss against a miss gives 0 (identical).
+const float DIST_SKY = 1e30;
 
 // ---------------------------------------------------------------------------
 // Ray generation
@@ -96,22 +116,27 @@ Ray MakePixelRay(vec2 pixel)
 // ---------------------------------------------------------------------------
 
 // Races every included shape family and keeps the closest hit. Returns true
-// on hit, with the hit distance t, the winner's family-space uv and the
-// winner's family ID (Family<Name>, declared in each shape's .inc) latched.
+// on hit, with the hit distance t, the winner's family-space uv, the
+// winner's world-space shading normal and the winner's family ID
+// (Family<Name>, declared in each shape's .inc) latched.
 //
 // Each family block must follow the plane pattern below: an
-// Intersect<Family>() that returns -1 on miss and only latches its uv when
-// t improves (a farther hit later in the block must never clobber the
-// closest hit's uv).
+// Intersect<Family>() that returns -1 on miss and only latches its uv AND
+// normal when t improves (a farther hit later in the block must never
+// clobber the closest hit's uv or normal). The normal is computed only in
+// the block that actually WINS the race so far (terrain's finite-difference
+// normal is the expensive one) - it feeds the display stage's edge-aware
+// upscaler, which needs one consistent normal per winning ray.
 // *universe is the side of the wormhole the ray is travelling on (+1 upper,
 // -1 lower): the terrain exists in BOTH universes (same heightfield), the
 // flat planes exist only in the upper one, so the lower-universe pass skips
 // the plane family.
-bool IntersectScene(Ray ray, int universe, out vec2 uv, out float t, out int family)
+bool IntersectScene(Ray ray, int universe, out vec2 uv, out float t, out int family, out vec3 nrm)
 {
     t      = -1.0;
     uv     = vec2(0.0);
     family = -1;
+    nrm    = vec3(0.0);
 
     // --- Plane family (upper universe only) ---
     if (universe >= 0)
@@ -121,7 +146,11 @@ bool IntersectScene(Ray ray, int universe, out vec2 uv, out float t, out int fam
             if (i >= PlaneCount) break;
             vec2 candUv;
             float th = IntersectPlane(ray.Origin, ray.Dir, i, candUv);
-            if (th > 0.0 && (t < 0.0 || th < t)) { t = th; uv = candUv; family = FamilyPlane; }
+            if (th > 0.0 && (t < 0.0 || th < t))
+            {
+                t = th; uv = candUv; family = FamilyPlane;
+                nrm = normalize(PlaneData[i * 3 + 1].xyz);
+            }
         }
     }
 
@@ -130,7 +159,14 @@ bool IntersectScene(Ray ray, int universe, out vec2 uv, out float t, out int fam
     {
         vec2 candUv;
         float th = IntersectTerrain(ray.Origin, ray.Dir, candUv);
-        if (th > 0.0 && (t < 0.0 || th < t)) { t = th; uv = candUv; family = FamilyTerrain; }
+        if (th > 0.0 && (t < 0.0 || th < t))
+        {
+            t = th; uv = candUv; family = FamilyTerrain;
+            // Finite-difference normal at the hit (world xz; the LOD octave
+            // falloff uses the path length th, exactly as ShadeTerrain did
+            // before the normal moved here).
+            nrm = TerrainNormal(candUv + TerrainData[0].xz, th);
+        }
     }
 
     return t > 0.0;
@@ -150,8 +186,8 @@ bool IntersectScene(Ray ray, int universe, out vec2 uv, out float t, out int fam
 // fog matches what the light actually travelled). On a miss, latches
 // *skyDir (final 3D direction) and *universe (the sheet the ray ended on).
 bool WhMarch(vec4 ro4, vec4 rd4,
-             out vec2 uv, out float t, out int family, out int universe,
-             out vec3 skyDir)
+             out vec2 uv, out float t, out int family, out vec3 nrm,
+             out int universe, out vec3 skyDir)
 {
     vec4  p4      = ro4;
     vec4  d4      = rd4;
@@ -185,9 +221,10 @@ bool WhMarch(vec4 ro4, vec4 rd4,
             vec2  tu;
             float th;
             int   tf;
-            if (IntersectScene(Ray(pos3, dir3), universe, tu, th, tf))
+            vec3  tn;
+            if (IntersectScene(Ray(pos3, dir3), universe, tu, th, tf, tn))
             {
-                uv = tu; t = pathLen + th; family = tf;
+                uv = tu; t = pathLen + th; family = tf; nrm = tn;
                 return true;
             }
             return false;                        // sky, tinted by *universe
@@ -208,9 +245,10 @@ bool WhMarch(vec4 ro4, vec4 rd4,
         vec2  tu;
         float th;
         int   tf;
-        if (IntersectScene(Ray(pos3, dir3), universe, tu, th, tf))
+        vec3  tn;
+        if (IntersectScene(Ray(pos3, dir3), universe, tu, th, tf, tn))
         {
-            uv = tu; t = pathLen + th; family = tf;
+            uv = tu; t = pathLen + th; family = tf; nrm = tn;
             return true;
         }
     }
@@ -247,14 +285,17 @@ void main()
     // The dispatch grid is rounded up to whole workgroups; ignore the tail.
     if (pix.x >= int(Resolution.x) || pix.y >= int(Resolution.y)) return;
 
-    // Closest scene hit (uv and family belong to the winning family).
+    // Closest scene hit (uv, family and nrm belong to the winning family).
     // t is the TOTAL path length of the ray (straight or 4D-bent) so fog
     // matches what the light actually travelled; skyDir is the final ray
     // direction; universe is the wormhole sheet the ray ends on (+1 upper,
-    // -1 lower) - it tints the sky and the fog.
+    // -1 lower) - it tints the sky and the fog. nrm is the winner's
+    // world-space shading normal (the zero vector = no hit, packed as the
+    // sky marker for the upscaler).
     vec2 uv = vec2(0.0);
     float t = 0.0;
     int family = -1;
+    vec3 nrm = vec3(0.0);
     vec3 skyDir = vec3(0.0, 1.0, 0.0);
     int universe = 1;
     bool hit = false;
@@ -309,7 +350,7 @@ void main()
                 {
                     // Never enters the mouth: the straight 3D path is exact.
                     skyDir = rd3;
-                    hit = IntersectScene(Ray(ro3, rd3), universe, uv, t, family);
+                    hit = IntersectScene(Ray(ro3, rd3), universe, uv, t, family, nrm);
                 }
                 else
                 {
@@ -323,16 +364,17 @@ void main()
                     vec2  puv;
                     float pt;
                     int   pf;
-                    bool  pre = IntersectScene(Ray(ro3, rd3), universe, puv, pt, pf);
+                    vec3  pn;
+                    bool  pre = IntersectScene(Ray(ro3, rd3), universe, puv, pt, pf, pn);
                     if (pre && pt < tEnter)
                     {
-                        uv = puv; t = pt; family = pf;
+                        uv = puv; t = pt; family = pf; nrm = pn;
                         skyDir = rd3;
                         hit = true;
                     }
                     else
                     {
-                        hit = WhMarch(ro4, rd4, uv, t, family, universe, skyDir);
+                        hit = WhMarch(ro4, rd4, uv, t, family, nrm, universe, skyDir);
                     }
                 }
             }
@@ -340,21 +382,21 @@ void main()
             {
                 // Looking straight through the mouth (the 4D ray has no 3D
                 // projection): it stays in the curved region; march it.
-                hit = WhMarch(ro4, rd4, uv, t, family, universe, skyDir);
+                hit = WhMarch(ro4, rd4, uv, t, family, nrm, universe, skyDir);
             }
         }
         else
         {
             // Camera inside the curved region (on the throat): every ray
             // lives in 4D until it reaches a sheet.
-            hit = WhMarch(ro4, rd4, uv, t, family, universe, skyDir);
+            hit = WhMarch(ro4, rd4, uv, t, family, nrm, universe, skyDir);
         }
     }
     else
     {
         Ray ray = MakePixelRay(vec2(pix));
         skyDir = ray.Dir;
-        hit = IntersectScene(ray, universe, uv, t, family);
+        hit = IntersectScene(ray, universe, uv, t, family, nrm);
     }
 
     vec3 color;
@@ -364,7 +406,7 @@ void main()
         // .inc declares its own shade function; extend the dispatch when
         // adding a family).
         color = (family == FamilyTerrain)
-                ? ShadeTerrain(uv, t)     // t = path length to hit -> normal LOD
+                ? ShadeTerrain(uv, t, nrm)   // t = path length to hit -> normal LOD
                 : ShadePlane(uv);
 
         // Distance fog (universe-tinted, see Sky.inc).
@@ -376,12 +418,33 @@ void main()
         color = SkyColor(skyDir) * UniverseTint(universe);
     }
 
-    // Pack RGBA8 into one uint (alpha always opaque).
+    // ------------------------------------------------------------
+    // Pack the pixel into the 3-uint stride the display stage expects
+    // (layout at the pixelBuf declaration above):
+    //   [0] packed RGBA8 color (alpha always opaque)
+    //   [1] the hit's TOTAL path length as float bits (DIST_SKY on a
+    //       miss) - the upscaler's primary edge signal; for a wormhole-
+    //       mediated hit it INCLUDES the 4D throat path, so opposite sides
+    //       of the mouth separate in the depth gate for free
+    //   [2] 3x8-bit world normal ([-1,1] -> [0,255]) | 8-bit family id in
+    //       the top byte (0 = sky, 1 = plane, 2 = terrain; = family + 1).
+    //       A wormhole-mediated hit reports the FINAL VISIBLE surface's
+    //       normal/id - no special "through-wormhole" class needed yet.
     // NOTE: the local name must not be 'packed' - it is a reserved GLSL keyword.
+    int stride = (pix.x + pix.y * int(Resolution.x)) * 3;
+
     uint packedPx = (uint(color.r * 255.0 + 0.5))
                 | (uint(color.g * 255.0 + 0.5) << 8)
                 | (uint(color.b * 255.0 + 0.5) << 16)
                 | 0xFF000000u;
 
-    pixelBuf.data[pix.x + pix.y * int(Resolution.x)] = packedPx;
+    vec3 ne = nrm * 0.5 + 0.5;    // sky: nrm = (0,0,0) -> mid-gray marker
+    uint normPack = uint(clamp(ne.x * 255.0 + 0.5, 0.0, 255.0))
+                 | (uint(clamp(ne.y * 255.0 + 0.5, 0.0, 255.0)) << 8)
+                 | (uint(clamp(ne.z * 255.0 + 0.5, 0.0, 255.0)) << 16)
+                 | ((hit ? uint(clamp(float(family) + 1.0, 0.0, 255.0)) : 0u) << 24);
+
+    pixelBuf.data[stride + 0] = packedPx;
+    pixelBuf.data[stride + 1] = floatBitsToUint(hit ? t : DIST_SKY);
+    pixelBuf.data[stride + 2] = normPack;
 }

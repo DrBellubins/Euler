@@ -17,6 +17,25 @@ public class TestScene : Scene
     private WorldCam worldCam = null!;
     private WormholePrimitive wormhole;
 
+    // Live-upscale control cycles (see Raymarcher for semantics).
+    private static readonly float[] RenderScaleCycle = { 1.0f, 0.75f, 0.67f, 0.5f };
+    private static readonly float[] DepthScaleCycle = { 5f, 10f, 25f, 50f, 100f };
+    private static readonly float[] NormalExponentCycle = { 1f, 2f, 4f, 8f, 16f, 32f };
+
+    private static readonly string[] DebugModeNames =
+    {
+        "final (edge-aware)", "nearest", "bilinear", "edge-aware (no sharpen)",
+        "distance", "normal", "family id", "edge mask"
+    };
+
+    private static float NextInCycle(float current, float[] cycle)
+    {
+        int idx = 0;
+        for (int i = 1; i < cycle.Length; i++)
+            if (Math.Abs(cycle[i] - current) < 0.001f) idx = i;
+        return cycle[(idx + 1) % cycle.Length];
+    }
+
     public override void Start()
     {
         freecam.Start();
@@ -47,6 +66,18 @@ public class TestScene : Scene
     public override void Update()
     {
         freecam.Update();
+
+        // --- Raymarcher upscale controls (live A/B of quality/perf) ---
+        if (Input.IsKeyPressed(KeyboardKey.F1))
+            raymarcher.RenderScale = NextInCycle(raymarcher.RenderScale, RenderScaleCycle);
+        if (Input.IsKeyPressed(KeyboardKey.F2))
+            raymarcher.DebugMode = (raymarcher.DebugMode + 1) % DebugModeNames.Length;
+        if (Input.IsKeyPressed(KeyboardKey.F4))
+            raymarcher.DepthScale = NextInCycle(raymarcher.DepthScale, DepthScaleCycle);
+        if (Input.IsKeyPressed(KeyboardKey.F5))
+            raymarcher.NormalExponent = NextInCycle(raymarcher.NormalExponent, NormalExponentCycle);
+        if (Input.IsKeyPressed(KeyboardKey.F7))
+            raymarcher.Sharpen = raymarcher.Sharpen <= 0f ? 0.5f : 0f;
         
         worldCam.Update(
             yawDelta:   -freecam.LookDelta.X * Freecam.LookSensitivity,
@@ -78,15 +109,10 @@ public class TestScene : Scene
         Raylib.ClearBackground(Color.Black);
         
         raymarcher.Draw(freecam.Camera, worldCam);
-
-        Raylib.DrawText($"FPS: {1f / (float)Time.DeltaTimeRaw}",
-            0, 0, 24, Color.White);
         
-        Raylib.DrawText($"Position: {freecam.Camera.Position}",
-            0, 28, 24, Color.White);
-        
-        Raylib.DrawText($"Current speed mult: {freecam.CurrentSpeedMultiplier}",
-            0, 50, 24, Color.White);
+        Debug.DrawDebug($"FPS: {1f / (float)Time.DeltaTimeRaw}");
+        Debug.DrawDebug($"Position: {freecam.Camera.Position}");
+        Debug.DrawDebug($"Current speed mult: {freecam.CurrentSpeedMultiplier}");
 
         string universe = worldCam.Universe switch
         {
@@ -95,8 +121,14 @@ public class TestScene : Scene
             _ => "throat (between universes)"
         };
         
-        Raylib.DrawText($"Wormhole: {universe}  (w = {worldCam.Pos.W:F2})",
-            0, 56, 24, Color.White);
+        Debug.DrawDebug($"Wormhole: {universe}  (w = {worldCam.Pos.W:F2})");
+
+        (int iw, int ih) = raymarcher.InternalSize;
+        
+        Debug.DrawDebug($"Render: {raymarcher.RenderScale:0.00}x  ({iw}x{ih} internal)  [F1 cycle]");
+        Debug.DrawDebug($"View: {DebugModeNames[raymarcher.DebugMode]}  [F2 cycle | F4 depth x{raymarcher.DepthScale:0} | F5 normal ^{raymarcher.NormalExponent:0} | F7 sharpen on/off]");
+
+        Debug.Draw();
         
         Raylib.EndDrawing();
     }
