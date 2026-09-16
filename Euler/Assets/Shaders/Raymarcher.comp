@@ -14,6 +14,7 @@
 //
 //     #include "Raymarcher/Shapes/Plane.inc"   plane shape family
 //     #include "Raymarcher/Shapes/Terrain.inc" infinite FBM heightfield terrain
+//     #include "Raymarcher/Shapes/Wormhole.inc" wormhole: event horizon + bent light
 //     #include "Raymarcher/Sky.inc"            sky / horizon atmosphere
 //
 // ADDING A FEATURE (the include contract):
@@ -43,6 +44,7 @@
 
 #include "Raymarcher/Shapes/Plane.inc"
 #include "Raymarcher/Shapes/Terrain.inc"
+#include "Raymarcher/Shapes/Wormhole.inc"
 #include "Raymarcher/Sky.inc"
 
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
@@ -122,6 +124,14 @@ bool IntersectScene(Ray ray, out vec2 uv, out float t, out int family)
         if (th > 0.0 && (t < 0.0 || th < t)) { t = th; uv = candUv; family = FamilyTerrain; }
     }
 
+    // --- Wormhole family (event horizon sphere) ---
+    if (WormholeEnabled > 0)
+    {
+        vec2 candUv;
+        float th = IntersectWormhole(ray.Origin, ray.Dir, candUv);
+        if (th > 0.0 && (t < 0.0 || th < t)) { t = th; uv = candUv; family = FamilyWormhole; }
+    }
+
     return t > 0.0;
 }
 
@@ -148,21 +158,142 @@ void main()
     Ray ray = MakePixelRay(vec2(pix));
 
     // Closest scene hit (uv and family belong to the winning family).
-    vec2 uv;
-    float t;
-    int family;
-    vec3 color;
-    if (IntersectScene(ray, uv, t, family))
+    // t is the TOTAL path length of the ray (straight or bent) so fog
+    // matches what the light actually travelled; skyDir is the final ray
+    // direction (bent rays exit the field angled).
+    vec2 uv = vec2(0.0);
+    float t = 0.0;
+    int family = -1;
+    vec3 skyDir = ray.Dir;
+    vec3 hitPos = ray.Origin;
+    bool hit = false;
+
+    if (WormholeEnabled > 0 && RayBendsAroundWormhole(ray.Origin, ray.Dir))
     {
-        // Dispatch shading to the family that won the race (each shape's
-        // .inc declares its own Shade<Family>(uv); extend the dispatch when
-        // adding a family).
-        color = (family == FamilyTerrain) ? ShadeTerrain(uv) : ShadePlane(uv);
-        color = ApplyFog(color, t, ray.Dir);
+        // ------------------------------------------------------------------
+        // Bent-ray trace: the "non-Euclidean" extension point of the driver
+        // header - Dir is bent between IntersectScene() steps (see
+        // Wormhole.inc for the field physics). Only rays passing within
+        // WORMHOLE_BEND_RADIUS of the mouth enter this path; the rest of
+        // the screen stays on the exact analytic trace below.
+        // ------------------------------------------------------------------
+        vec3 pos = ray.Origin;
+        vec3 dir = ray.Dir;
+        float pathLen = WormholeBendPreflight(ray.Origin, ray.Dir, pos);
+
+        for (int i = 0; i < WORMHOLE_MAX_BEND_STEPS && !hit; i++)
+        {
+            vec3  dc = pos - WormholeCenter();
+            float r  = length(dc);
+
+            // Captured by the event horizon: black disc (ShadeWormhole adds
+            // the photon-ring rim).
+            if (r <= WormholeRadius())
+            {
+                family = FamilyWormhole;
+                uv     = vec2(0.0);
+                t      = pathLen;
+                hitPos = pos;
+                hit    = true;
+                break;
+            }
+
+            // Closest straight scene hit from here (the race includes the
+            // horizon sphere itself).
+            vec2  tuv;
+            float th;
+            int   tfam;
+            bool  hasHit = IntersectScene(Ray(pos, dir), tuv, th, tfam);
+
+            // Adaptive step: ~0.05 rad of deflection per step near the
+            // throat (where orbits are tight), up to 0.35 world units far
+            // out (where the field is weak).
+            float dt = max(min(0.35, 0.05 * r * r / WormholeRadius()), 1e-4);
+
+            if (hasHit && th <= dt)
+            {
+                // A scene surface lies before the next bend: consume it.
+                family = tfam;
+                uv     = tuv;
+                t      = pathLen + th;
+                hitPos = pos + dir * th;
+                skyDir = dir;
+                hit    = true;
+                break;
+            }
+
+            pos += dir * dt;
+            pathLen += dt;
+
+            // Newtonian photon deflection with mu = Rs: a = -Rs * d / r^3.
+            // Reproduces the GR point-mass deflection angle delta = 2 Rs / b
+            // (see Wormhole.inc for the derivation).
+            float r2 = dot(dc, dc);
+            dir = normalize(dir - WormholeRadius() * dc / (r2 * r) * dt);
+
+            // Escaped the field and moving away: take over with the exact
+            // straight trace (bending is negligible beyond the field).
+            vec3 d2 = pos - WormholeCenter();
+            if (dot(d2, d2) > WormholeBendRadius2() && dot(dir, d2) > 0.0)
+            {
+                vec2  tu2;
+                float th2;
+                int   tf2;
+                if (IntersectScene(Ray(pos, dir), tu2, th2, tf2))
+                {
+                    family = tf2;
+                    uv     = tu2;
+                    t      = pathLen + th2;
+                    hitPos = pos + dir * th2;
+                    hit    = true;
+                }
+                skyDir = dir;
+                break;
+            }
+        }
+
+        if (!hit)
+        {
+            // Step budget exhausted (deep orbit): exact straight tail.
+            vec2  tu;
+            float th;
+            int   tf;
+            if (IntersectScene(Ray(pos, dir), tu, th, tf))
+            {
+                family = tf;
+                uv     = tu;
+                t      = pathLen + th;
+                hitPos = pos + dir * th;
+                hit    = true;
+            }
+            skyDir = dir;
+        }
     }
     else
     {
-        color = SkyColor(ray.Dir);
+        hit = IntersectScene(ray, uv, t, family);
+        if (hit) hitPos = ray.Origin + ray.Dir * t;
+    }
+
+    vec3 color;
+    if (hit)
+    {
+        // Dispatch shading to the family that won the race (each shape's
+        // .inc declares its own shade function; extend the dispatch when
+        // adding a family).
+        color = (family == FamilyTerrain)
+                ? ShadeTerrain(uv)
+              : (family == FamilyWormhole)
+                ? ShadeWormhole(normalize(hitPos - WormholeCenter()), skyDir)
+                : ShadePlane(uv);
+
+        // The horizon is "eternally black" - don't wash it with distance fog.
+        if (family != FamilyWormhole)
+            color = ApplyFog(color, t, skyDir);
+    }
+    else
+    {
+        color = SkyColor(skyDir);
     }
 
     // Pack RGBA8 into one uint (alpha always opaque).

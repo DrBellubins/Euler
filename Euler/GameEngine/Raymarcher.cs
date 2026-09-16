@@ -8,9 +8,10 @@ namespace Euler.GameEngine;
 
 /// <summary>
 /// Full-screen raymarch renderer for flat, textured plane primitives
-/// (<see cref="PlanePrimitive"/>) and an infinite FBM terrain
-/// (<see cref="TerrainPrimitive"/>). Scene contents are modular shape
-/// families - see the includes in <c>Raymarcher.comp</c>.
+/// (<see cref="PlanePrimitive"/>), an infinite FBM terrain
+/// (<see cref="TerrainPrimitive"/>) and a wormhole with a light-bending
+/// gravitational field (<see cref="WormholePrimitive"]). Scene contents are
+/// modular shape families - see the includes in <c>Raymarcher.comp</c>.
 ///
 /// Pipeline (compute):
 /// <list type="number">
@@ -67,6 +68,9 @@ public class Raymarcher
     private TerrainPrimitive _terrain;     // at most one (a heightfield spans all XZ)
     private readonly float[] _terrainData = new float[16];
     private bool _hasTerrain;
+    private WormholePrimitive _wormhole;   // at most one (the field is a per-pixel global effect)
+    private readonly float[] _wormholeData = new float[4];
+    private bool _hasWormhole;
 
     // Output SSBO: one packed RGBA8 uint per pixel (W*H*4 bytes), bound to
     // PixelBufferBinding for both programs.
@@ -83,6 +87,8 @@ public class Raymarcher
     private int _locTerrainEnabled;
     private int _locTerrainData;
     private int _locTerrainTex;
+    private int _locWormholeEnabled;
+    private int _locWormholeData;
 
     // Display shader uniform locations.
     private int _locDisplayResolution;
@@ -106,6 +112,8 @@ public class Raymarcher
         _locTerrainEnabled = Raylib.GetShaderLocation(_computeShader, "TerrainEnabled");
         _locTerrainData    = Raylib.GetShaderLocation(_computeShader, "TerrainData");
         _locTerrainTex     = Raylib.GetShaderLocation(_computeShader, "TerrainTex");
+        _locWormholeEnabled = Raylib.GetShaderLocation(_computeShader, "WormholeEnabled");
+        _locWormholeData    = Raylib.GetShaderLocation(_computeShader, "WormholeData");
         _locDisplayResolution = Raylib.GetShaderLocation(_displayShader, "Resolution");
 
         // A single white pixel is all the full-screen quad needs.
@@ -135,6 +143,17 @@ public class Raymarcher
         _hasTerrain = true;
     }
 
+    /// <summary>
+    /// Sets the scene's wormhole. The gravitational field is a per-pixel
+    /// global effect, so there is only ever one - a second call REPLACES the
+    /// first (unlike <see cref="AddPlane"/>).
+    /// </summary>
+    public void AddWormhole(WormholePrimitive wormhole)
+    {
+        _wormhole = wormhole;
+        _hasWormhole = true;
+    }
+
     /// <summary>Draws the raymarched scene for <paramref name="camera"/> (fills the whole window).</summary>
     public void Draw(Camera3D camera)
     {
@@ -150,6 +169,9 @@ public class Raymarcher
 
         if (_hasTerrain)
             _terrain.WriteInto(_terrainData, 0);
+
+        if (_hasWormhole)
+            _wormhole.WriteInto(_wormholeData, 0);
 
         // ---------------------------------------------------------------
         // Stage 1 - compute: raymarch every pixel into the pixel SSBO.
@@ -187,6 +209,10 @@ public class Raymarcher
         if (_hasTerrain)
             Raylib.SetShaderValueV(_computeShader, _locTerrainData, _terrainData, ShaderUniformDataType.Vec4, 4);
         Raylib.SetShaderValue(_computeShader, _locTerrainTex, TerrainTexUnit, ShaderUniformDataType.Int);
+
+        Raylib.SetShaderValue(_computeShader, _locWormholeEnabled, _hasWormhole ? 1 : 0, ShaderUniformDataType.Int);
+        if (_hasWormhole)
+            Raylib.SetShaderValueV(_computeShader, _locWormholeData, _wormholeData, ShaderUniformDataType.Vec4, 1);
 
         // Grid rounded up to whole workgroups; the shader guards the tail.
         Rlgl.ComputeShaderDispatch(

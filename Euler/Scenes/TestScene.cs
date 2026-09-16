@@ -30,6 +30,13 @@ public class TestScene : Scene
             uvScale: new Vector2(0.5f, 0.5f),
             sunDirection: new Vector3(0.5f, 1.0f, 0.3f),
             sunIntensity: 0.8f));
+
+        // A wormhole mouth floating above the terrain: a black event horizon
+        // with light bending around it (photon ring + lensed halo). The
+        // camera starts at (0,0,-10) looking +Z, so (0,6,6) sits ahead and
+        // slightly above center; the horizon bottom (y = 4) clears the
+        // terrain's peak tops (~3.5).
+        raymarcher.AddWormhole(new WormholePrimitive(new Vector3(0, 6, 6), 2.0f));
     }
 
     public override void Update()
