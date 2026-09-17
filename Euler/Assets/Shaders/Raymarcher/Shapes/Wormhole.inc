@@ -56,7 +56,13 @@ vec3  WhCenter() { return WormholeData[0].xyz; }
 // Kept modest on purpose: the per-step cost here is a few sqrt/dot (no scene
 // SDF), and the real per-pixel cost is the terrain march at the exit, which
 // the terrain's distance LOD (TERRAIN_LOD_*) keeps cheap.
-#define WH_MAX_STEPS 96
+// 384: the longest throat ride (a diameter chord plus the half-tube arc)
+// is ~sqrt((2 rMaj)^2 + (pi rMin)^2) of 4D path - about 5 units for the
+// default 2/1 radii - which at the 0.02 * rMin step below takes ~254
+// steps, plus a few large flat-sheet approach steps. The cap only costs a
+// thin band of looping pixels, and the per-step cost is a few sqrt/dot
+// (no scene SDF).
+#define WH_MAX_STEPS 384
 
 // ---------------------------------------------------------------------------
 // 4D space geometry (the hypersurface the camera and rays live on)
@@ -113,19 +119,34 @@ void SpaceNormalize(inout vec4 p, inout vec4 d)
     d = (l > 1e-6) ? q / l : d;
 }
 
-// Step limit for the 4D march: constant (0.1 * rMin) in the curved region -
-// fine enough to resolve the throat's curvature - and growing with distance
-// from the rim on the sheets, where the space is flat and big steps are safe.
+// Step limit for the 4D march: constant (0.02 * rMin) in the curved region
+// and growing with distance from the rim on the sheets, where the space is
+// flat and big steps are safe.
+//
+// The 0.02 factor matters: the snap march converges to a definite limit
+// curve as step -> 0, and the tube ride accumulates a direction error of
+// ~O(step) (the exit 3D direction tilts by up to ~0.05 rad at step 0.1).
+// That tilt is what flips grazing handoff rays between hit and sky in a
+// narrow band at the rim - the 1-3px sky ring around the mouth that
+// shifted with camera angle. At 0.02 the march matches the converged limit
+// closely and the rim band is stable.
 float SpaceStepLimit(vec4 p)
 {
-    return max(0.1 * WhRmin(), length(p.xyz) - WhRmaj());
+    return max(0.02 * WhRmin(), length(p.xyz) - WhRmaj());
 }
 
-// True when p sits on a flat sheet (|w| = rMin after the snap): the space
-// there is a flat 3D hyperplane, so a straight exact 3D path is valid for a
-// ray from p (and its 3D projection is the 4D ray itself - d.w = 0 on the
-// sheet).
+// True when p sits on a flat sheet (|w| = rMin after the snap) OUTSIDE the
+// mouth ball: the space there is a flat 3D hyperplane, so a straight exact
+// 3D path is valid for a ray from p (and its 3D projection is the 4D ray
+// itself - d.w = 0 on the sheet).
+//
+// The ball guard is essential: a camera on the throat's inner wall
+// (|xyz| < rMaj, |w| ~= rMin) satisfies the w test but is NOT on a flat
+// sheet - the 3D path there is wrong (the straight ray never "enters"
+// the ball, so the wormhole disappears when the player crosses the rim).
+// Such a camera must be marched from the inside instead.
 bool WhOnSheet(vec4 p)
 {
-    return abs(p.w) >= WhRmin() - 1e-4;
+    return abs(p.w) >= WhRmin() - 1e-4
+        && dot(p.xyz, p.xyz) >= WhRmaj() * WhRmaj();
 }
