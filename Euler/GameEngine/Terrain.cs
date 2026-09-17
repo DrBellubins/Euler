@@ -13,6 +13,10 @@ namespace Euler.GameEngine;
 /// Only ONE terrain exists per scene: a heightfield already occupies the whole
 /// XZ plane, so <see cref="Raymarcher.AddTerrain"/> replaces rather than
 /// accumulates.
+///
+/// The terrain carries NO lighting of its own: it is lit by the scene's
+/// <see cref="Sun"/> (directional diffuse + ray-traced hard shadows, see
+/// <c>Assets/Shaders/Raymarcher/Lighting.inc</c>).
 /// </summary>
 public struct TerrainPrimitive
 {
@@ -34,35 +38,24 @@ public struct TerrainPrimitive
     /// <summary>UV tiling: texture repeats per world unit along world X/Z.</summary>
     public Vector2 UvScale;
 
-    /// <summary>
-    /// Direction from a surface point toward the sun (normalized in the shader;
-    /// a zero vector falls back to +Y).
-    /// </summary>
-    public Vector3 SunDirection;
-
-    /// <summary>Sun diffuse intensity.</summary>
-    public float SunIntensity;
-
     public TerrainPrimitive(Vector3 offset, float amplitude, float frequency, float octaves,
-        Vector2 uvScale, Vector3 sunDirection, float sunIntensity = 1f)
+        Vector2 uvScale)
     {
         Offset = offset;
         Amplitude = amplitude;
         Frequency = frequency;
         Octaves = octaves;
         UvScale = uvScale;
-        SunDirection = sunDirection;
-        SunIntensity = sunIntensity;
     }
 
     /// <summary>
     /// Packs this terrain into <paramref name="data"/> at <paramref name="index"/>
-    /// as 4 consecutive vec4s matching the shader's TerrainData layout:
-    /// <code>[offset.xyz, 0] [amplitude, frequency, octaves, 0] [sunDir.xyz, sunIntensity] [uvScale.x, uvScale.y, 0, 0]</code>
+    /// as 3 consecutive vec4s matching the shader's TerrainData layout:
+    /// <code>[offset.xyz, 0] [amplitude, frequency, octaves, 0] [uvScale.x, uvScale.y, 0, 0]</code>
     /// </summary>
     public void WriteInto(Span<float> data, int index)
     {
-        int o = index * 16;
+        int o = index * 12;
         data[o + 0] = Offset.X;
         data[o + 1] = Offset.Y;
         data[o + 2] = Offset.Z;
@@ -71,13 +64,9 @@ public struct TerrainPrimitive
         data[o + 5] = Frequency;
         data[o + 6] = Octaves;
         data[o + 7] = 0f;
-        data[o + 8] = SunDirection.X;
-        data[o + 9] = SunDirection.Y;
-        data[o + 10] = SunDirection.Z;
-        data[o + 11] = SunIntensity;
-        data[o + 12] = UvScale.X;
-        data[o + 13] = UvScale.Y;
-        data[o + 14] = 0f;
-        data[o + 15] = 0f;
+        data[o + 8] = UvScale.X;
+        data[o + 9] = UvScale.Y;
+        data[o + 10] = 0f;
+        data[o + 11] = 0f;
     }
 }

@@ -16,6 +16,10 @@ public class TestScene : Scene
     private Raymarcher raymarcher = null!;
     private WorldCam worldCam = null!;
     private WormholePrimitive wormhole;
+    private Sun sun = null!;
+
+    // Sun control speed (degrees per second, arrow keys).
+    private const float SunRotateSpeed = 45f;
 
     // Live-upscale control cycles (see Raymarcher for semantics).
     private static readonly float[] RenderScaleCycle = { 0.5f, 0.75f, 1.0f };
@@ -46,9 +50,14 @@ public class TestScene : Scene
             amplitude: 12.5f,
             frequency: 0.04f,
             octaves: 5,
-            uvScale: new Vector2(0.5f, 0.5f),
-            sunDirection: new Vector3(0.5f, 1.0f, 0.3f),
-            sunIntensity: 0.8f));
+            uvScale: new Vector2(0.5f, 0.5f)));
+        
+        // Directional light: same beam as the terrain used to carry
+        // (toSun = (0.5, 1, 0.3), intensity 0.8) - the Sun now owns it.
+        sun = new Sun(new Vector3(0, 40, 0));
+        sun.SetLightDirection(new Vector3(-0.5f, -1f, -0.3f));
+        sun.Intensity = 0.8f;
+        raymarcher.AddSun(sun);
         
         wormhole = new WormholePrimitive(new Vector3(0, 4, 6), rmaj: 2.0f, rmin: 1.0f);
         raymarcher.AddWormhole(wormhole);
@@ -67,6 +76,8 @@ public class TestScene : Scene
     {
         freecam.Update();
 
+        float dt = Time.DeltaTimeF;
+
         // --- Raymarcher upscale controls (live A/B of quality/perf) ---
         if (Input.IsKeyPressed(KeyboardKey.F1))
             raymarcher.RenderScale = NextInCycle(raymarcher.RenderScale, RenderScaleCycle);
@@ -82,6 +93,27 @@ public class TestScene : Scene
         
         if (Input.IsKeyPressed(KeyboardKey.F7))
             raymarcher.Sharpen = raymarcher.Sharpen <= 0f ? 0.5f : 0f;
+        
+        // --- Sun controls (arrow keys rotate the beam, [ ] its intensity) ---
+        float sunDelta = 0f;
+        if (Input.IsKeyDown(KeyboardKey.Left))  sunDelta += SunRotateSpeed * dt;
+        if (Input.IsKeyDown(KeyboardKey.Right)) sunDelta -= SunRotateSpeed * dt;
+        
+        if (sunDelta != 0f)
+            sun.RotateBy(new Vector3(0f, sunDelta, 0f));   // yaw (quaternion math in Sun)
+        
+        float sunPitch = 0f;
+        if (Input.IsKeyDown(KeyboardKey.Up))   sunPitch += SunRotateSpeed * dt;
+        if (Input.IsKeyDown(KeyboardKey.Down)) sunPitch -= SunRotateSpeed * dt;
+        
+        if (sunPitch != 0f)
+            sun.RotateBy(new Vector3(sunPitch, 0f, 0f));  // pitch
+        
+        if (Input.IsKeyDown(KeyboardKey.LeftBracket))
+            sun.Intensity = GMath.Clamp(sun.Intensity + dt, 0f, 3f);
+        
+        if (Input.IsKeyDown(KeyboardKey.RightBracket))
+            sun.Intensity = GMath.Clamp(sun.Intensity - dt, 0f, 3f);
         
         worldCam.Update(
             yawDelta:   -freecam.LookDelta.X * Freecam.LookSensitivity,
@@ -131,6 +163,9 @@ public class TestScene : Scene
         
         Debug.DrawDebug($"Render: {raymarcher.RenderScale:0.00}x  ({iw}x{ih} internal)  [F1 cycle]");
         Debug.DrawDebug($"View: {DebugModeNames[raymarcher.DebugMode]}  [F2 cycle | F4 depth x{raymarcher.DepthScale:0} | F5 normal ^{raymarcher.NormalExponent:0} | F7 sharpen on/off]");
+
+        Vector3 sunEuler = sun.EulerAnglesDegrees;
+        Debug.DrawDebug($"Sun: dir {sun.Direction}  euler({sunEuler.X:F0},{sunEuler.Y:F0},{sunEuler.Z:F0})  intensity {sun.Intensity:F2}  [arrows rotate | [ ] intensity]");
 
         Debug.Draw();
         

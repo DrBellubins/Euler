@@ -12,17 +12,19 @@
 // It follows the same contract as the other shape families:
 //
 //     data layout + uniforms  ->  IntersectTerrain(ro, rd, out uv)
-//                                 ->  ShadeTerrain(uv, dist, nrm)
+//                                 ->  ShadeTerrain(uv)   (the ALBEDO)
 //
-// (Terrain's shade takes two arguments beyond the plane pattern: the hit's
-// path length `dist`, which drives the distance LOD of the FBM octaves - see
-// TERRAIN_LOD_* below - and `nrm`, the finite-difference normal the driver's
-// IntersectScene latched for the winning ray. IntersectTerrain's signature
-// is unchanged.)
+// (The finite-difference shading normal is computed in the driver's
+// IntersectScene, which latches it for the winning ray - the upscaler and
+// the lighting system share one normal per hit. The LOD octave falloff for
+// that normal and for the march is the TERRAIN_LOD_* mechanism below.)
 //
 // uv is the hit's XZ in the terrain's LOCAL frame (world units, UNTILED);
-// ShadeTerrain() does the tiling and the lighting (the normal arrives from
-// the driver, see its header).
+// ShadeTerrain() does the tiling only - the sun + hard shadows arrive from
+// the lighting system (Raymarcher/Lighting.inc).
+//
+// The shadow-ray path (IntersectTerrainShadow) shares the march via
+// MarchTerrain with a relaxed sub-surface guard - see there.
 //
 // NOTE: no #version directive here - included files must never carry one;
 // #version must remain the first line of the main (expanding) shader.
@@ -31,14 +33,14 @@
 // shading to the family that won the closest-hit race (see Plane.inc).
 const int FamilyTerrain = 1;
 
-// Per-terrain uniform data lives in TerrainData (4 vec4):
+// Per-terrain uniform data lives in TerrainData (3 vec4):
 //   [0] offset.xyz, 0
 //   [1] amplitude, frequency, octaves, 0
-//   [2] sunDir.xyz, sunIntensity
-//   [3] uvScale.xy, 0, 0
-// See TerrainPrimitive.WriteInto for the C# side.
+//   [2] uvScale.xy, 0, 0
+// See TerrainPrimitive.WriteInto for the C# side. (The terrain carries no
+// light of its own - the scene's sun is uniform, see Raymarcher/Lighting.inc.)
 uniform int   TerrainEnabled;   // 0/1: the scene has a terrain
-uniform vec4  TerrainData[4];
+uniform vec4  TerrainData[3];
 
 // Bound to texture unit 1 by the C# side before the dispatch (PlaneTex owns
 // unit 0; see the Raymarcher.comp header notes on why Raylib.SetShaderValueTexture
@@ -176,13 +178,22 @@ vec3 TerrainNormal(vec2 worldXz, float dist)
 // Intersection: raymarch the heightfield
 // ---------------------------------------------------------------------------
 
-// Marches the infinite heightfield. Returns distance t (or -1 on miss) and
-// latches the hit's LOCAL xz into *uv.
+// The infinite heightfield march (shared by the primary and the shadow
+// rays). Returns distance t (or -1 on miss) and latches the hit's LOCAL xz
+// into *uv.
 //
 // The plane family is analytic-infinite; a march needs a horizon. The
 // driver's fog (1 - exp(-0.010 * t), see ApplyFog) is ~1.0 beyond ~800
 // units, so a miss past the cap renders pure fog - the cap is invisible.
-float IntersectTerrain(vec3 ro, vec3 rd, out vec2 uv)
+//
+// `shadow` selects the shadow-ray variant: a shadow ray's normal-biased
+// origin can sit INSIDE the surface (a steep slope pulls it below), and the
+// sub-surface early-out must NOT fire there - the surface it sits in
+// occludes its own point only as ACNE, so the march folds it into a t~=0
+// hit (the bisection converges on the crossing at the origin) and the
+// lighting system's SHADOW_HIT_TOL folds THAT back into "lit". A primary
+// ray below the surface is a degenerate case (no interior) and stays a miss.
+float MarchTerrain(vec3 ro, vec3 rd, bool shadow, out vec2 uv)
 {
     uv = vec2(0.0);
 
@@ -202,8 +213,9 @@ float IntersectTerrain(vec3 ro, vec3 rd, out vec2 uv)
 
     // Camera at/below the surface: a heightfield has no interior, so the
     // marched distance would be inconsistent - report a miss (the scene
-    // degrades to sky) instead of marching garbage.
-    if (TerrainHeight(ro.xz, 0.0) >= ro.y) return -1.0;   // dist 0 -> full octaves
+    // degrades to sky) instead of marching garbage. (Shadow rays exempt -
+    // see the function header.)
+    if (!shadow && TerrainHeight(ro.xz, 0.0) >= ro.y) return -1.0;   // dist 0 -> full octaves
 
     const float MaxDist  = 1000.0;
     const int   MaxSteps = 128;
@@ -259,26 +271,30 @@ float IntersectTerrain(vec3 ro, vec3 rd, out vec2 uv)
     return -1.0;
 }
 
+// Primary-ray intersection: full detail, sub-surface origins are a miss.
+float IntersectTerrain(vec3 ro, vec3 rd, out vec2 uv)
+{
+    return MarchTerrain(ro, rd, false, uv);
+}
+
+// Shadow-ray intersection (the driver's IntersectSceneShadow): hit distance
+// only - same march, relaxed sub-surface guard, the uv latch is unused.
+float IntersectTerrainShadow(vec3 ro, vec3 rd)
+{
+    vec2 uv;
+    return MarchTerrain(ro, rd, true, uv);
+}
+
 // ---------------------------------------------------------------------------
 // Shading
 // ---------------------------------------------------------------------------
 
-// Terrain shading: tiled texture + lambertian sun, using the finite-
-// difference normal so the hills read as 3D. *uv is the LOCAL xz, world
-// units, untiled (see IntersectTerrain). `nrm` is the finite-difference
-// normal the driver's IntersectScene latched when the terrain won the race
-// (same inputs as the TerrainNormal call this replaces: world xz + path
-// length) - computing it there means the upscaler and the shading share ONE
-// normal per hit instead of evaluating it twice.
-vec3 ShadeTerrain(vec2 localXz, float dist, vec3 nrm)
+// Terrain material: the ALBEDO (tiled texture). Lighting (sun diffuse +
+// ray-traced hard shadows + the ambient floor) is applied by the driver's
+// ApplyLighting call (Raymarcher/Lighting.inc), so every family - terrain
+// and planes - lights identically. *uv is the LOCAL xz, world units,
+// untiled (see IntersectTerrain).
+vec3 ShadeTerrain(vec2 localXz)
 {
-    vec3 n = nrm;
-
-    vec4 sd = TerrainData[2];
-    float len = length(sd.xyz);
-    vec3 sunDir = (len > 1e-5) ? sd.xyz / len : vec3(0.0, 1.0, 0.0);
-    float diff = max(dot(n, sunDir), 0.0) * sd.w;
-
-    vec3 tex = texture(TerrainTex, localXz * TerrainData[3].xy).rgb;
-    return tex * (0.35 + diff);   // 0.35 ambient floor
+    return texture(TerrainTex, localXz * TerrainData[2].xy).rgb;
 }

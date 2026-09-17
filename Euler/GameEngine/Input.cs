@@ -200,6 +200,10 @@ public static class Input
     // Edge detection (manual: this snapshot vs. previous snapshot)
     // -----------------------------------------------------------------
 
+    /// <summary>True while <paramref name="key"/> is held (this frame's snapshot).</summary>
+    public static bool IsKeyDown(KeyboardKey key)
+        => _currentKeys[(int)key];
+
     /// <summary>True only on the first frame <paramref name="key"/> is held.</summary>
     public static bool IsKeyPressed(KeyboardKey key)
         => _currentKeys[(int)key] && !_prevKeys[(int)key];

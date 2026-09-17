@@ -33,6 +33,30 @@ namespace Euler.GameEngine;
 /// #include pre-processor applies to the compute shader exactly like the
 /// graphic stages.
 /// </summary>
+/// <summary>
+/// Ray-traced lighting passes (bitmask; mirrors the LIGHT_PASS_* bits in
+/// <c>Raymarcher/Lighting.inc</c>). <see cref="Shadows"/> is the only
+/// implemented pass today (single-pass hard shadows); the other bits are
+/// reserved so a future pass (reflections, GI, ...) is added as a shader
+/// function + a flag, not a lighting rework.
+/// </summary>
+[Flags]
+public enum LightPasses
+{
+    None = 0,
+
+    /// <summary>Single-pass ray-traced hard shadows: one shadow ray toward the
+    /// sun per lit surface point, traced through the full (wormhole) scene.
+    /// A hit removes the sun's diffuse contribution entirely (no penumbra).</summary>
+    Shadows = 1 << 0,
+
+    /// <summary>Reserved: ray-traced reflections (one reflection ray per surface).</summary>
+    Reflections = 1 << 1,
+
+    /// <summary>Reserved: global illumination (indirect light samples).</summary>
+    GlobalIllumination = 1 << 2,
+}
+
 public class Raymarcher
 {
     public const int MaxPlanes = 8;
@@ -73,6 +97,14 @@ public class Raymarcher
     /// <summary>Mild unsharp amount applied relative to plain bilinear (0 = off).</summary>
     public float Sharpen { get; set; }
 
+    /// <summary>
+    /// The ray-traced lighting passes enabled in the compute stage (see
+    /// <see cref="LightPasses"/> and <c>Raymarcher/Lighting.inc</c>). Hard
+    /// shadows are on by default; the sun itself is added separately with
+    /// <see cref="AddSun"/> (no sun = no direct light, whatever the passes).
+    /// </summary>
+    public LightPasses LightingPasses { get; set; } = LightPasses.Shadows;
+
     private const string ComputeShaderPath = "Assets/Shaders/Raymarcher.comp";
     private const string DisplayShaderPath = "Assets/Shaders/RaymarcherDisplay.fs";
 
@@ -109,11 +141,14 @@ public class Raymarcher
     private readonly float[] _planeData = new float[MaxPlanes * 12];
     private int _planeCount;
     private TerrainPrimitive _terrain;     // at most one (a heightfield spans all XZ)
-    private readonly float[] _terrainData = new float[16];
+    private readonly float[] _terrainData = new float[12];
     private bool _hasTerrain;
     private WormholePrimitive _wormhole;   // at most one (the throat is a per-pixel global effect)
     private readonly float[] _wormholeData = new float[8];
     private bool _hasWormhole;
+    private Sun _sun = null!;              // at most one (a directional light is a global)
+    private readonly float[] _sunData = new float[8];
+    private bool _hasSun;
 
     // Output SSBO: 3 uints per INTERNAL-resolution pixel (12 bytes) -
     // [0] packed RGBA8 color, [1] hit path length (float bits; DIST_SKY on a
@@ -135,6 +170,9 @@ public class Raymarcher
     private int _locWormholeEnabled;
     private int _locWormholeData;
     private int _locWormholeCam;
+    private int _locSunEnabled;
+    private int _locSunData;
+    private int _locLightingPasses;
 
     // Display (upscale) shader uniform locations.
     private int _locDisplayResolution;
@@ -168,6 +206,9 @@ public class Raymarcher
         _locWormholeEnabled = Raylib.GetShaderLocation(_computeShader, "WormholeEnabled");
         _locWormholeData    = Raylib.GetShaderLocation(_computeShader, "WormholeData");
         _locWormholeCam     = Raylib.GetShaderLocation(_computeShader, "WormholeCam");
+        _locSunEnabled      = Raylib.GetShaderLocation(_computeShader, "SunEnabled");
+        _locSunData         = Raylib.GetShaderLocation(_computeShader, "SunData");
+        _locLightingPasses  = Raylib.GetShaderLocation(_computeShader, "LightingPasses");
         _locDisplayResolution = Raylib.GetShaderLocation(_displayShader, "Resolution");
         _locLowRes = Raylib.GetShaderLocation(_displayShader, "LowRes");
         _locDebugMode = Raylib.GetShaderLocation(_displayShader, "DebugMode");
@@ -229,6 +270,18 @@ public class Raymarcher
     {
         _wormhole = wormhole;
         _hasWormhole = true;
+    }
+
+    /// <summary>
+    /// Sets the scene's sun (directional light). A directional light is a
+    /// global, so there is only ever one - a second call REPLACES the first
+    /// (unlike <see cref="AddPlane"/>). The light travels along the sun's
+    /// rotated local -Y axis; see <see cref="Sun"/> for the move/rotate API.
+    /// </summary>
+    public void AddSun(Sun sun)
+    {
+        _sun = sun;
+        _hasSun = true;
     }
 
     /// <summary>Draws the raymarched scene (fills the whole window).
@@ -296,12 +349,22 @@ public class Raymarcher
 
         Raylib.SetShaderValue(_computeShader, _locTerrainEnabled, _hasTerrain ? 1 : 0, ShaderUniformDataType.Int);
         if (_hasTerrain)
-            Raylib.SetShaderValueV(_computeShader, _locTerrainData, _terrainData, ShaderUniformDataType.Vec4, 4);
+            Raylib.SetShaderValueV(_computeShader, _locTerrainData, _terrainData, ShaderUniformDataType.Vec4, 3);
         Raylib.SetShaderValue(_computeShader, _locTerrainTex, TerrainTexUnit, ShaderUniformDataType.Int);
 
         Raylib.SetShaderValue(_computeShader, _locWormholeEnabled, _hasWormhole ? 1 : 0, ShaderUniformDataType.Int);
         if (_hasWormhole)
             Raylib.SetShaderValueV(_computeShader, _locWormholeData, _wormholeData, ShaderUniformDataType.Vec4, 2);
+
+        // Lighting: the sun (the only directional light today) and the
+        // enabled ray-traced lighting passes (Raymarcher/Lighting.inc).
+        Raylib.SetShaderValue(_computeShader, _locSunEnabled, _hasSun ? 1 : 0, ShaderUniformDataType.Int);
+        if (_hasSun)
+        {
+            _sun.WriteInto(_sunData);
+            Raylib.SetShaderValueV(_computeShader, _locSunData, _sunData, ShaderUniformDataType.Vec4, 2);
+        }
+        Raylib.SetShaderValue(_computeShader, _locLightingPasses, (int)LightingPasses, ShaderUniformDataType.Int);
 
         // Grid rounded up to whole workgroups; the shader guards the tail.
         // (INTERNAL size - the whole point of RenderScale.)
