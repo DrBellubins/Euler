@@ -47,7 +47,7 @@ public class TestScene : Scene
         
         raymarcher.AddTerrain(new TerrainPrimitive(
             offset: new Vector3(0, -4, 0),
-            amplitude: 12.5f,
+            amplitude: 30.5f,
             frequency: 0.04f,
             octaves: 5,
             uvScale: new Vector2(0.5f, 0.5f)));

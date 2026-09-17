@@ -66,10 +66,15 @@ vec3 SunDir()
 const float SHADOW_NORMAL_BIAS = 0.05;
 
 // A shadow hit closer than this total path length is the point's OWN
-// surface, not a separate occluder: the heightfield march folds a
-// sub-surface origin (the acne case) into a t~=0 crossing, and grazing
-// re-crossings of the same surface do too. Treat it as lit.
-const float SHADOW_HIT_TOL = 0.05;
+// surface, not a separate occluder: the heightfield march reports a
+// sub-surface / self-slope origin (the acne case) as a near-zero crossing -
+// and then marches through the interior to the real occluder (see
+// MarchTerrain in Terrain.inc, which uses the same tolerance to decide when
+// a crossing is the point's own surface) - and grazing re-crossings of the
+// same surface do too. Treat it as lit.
+// SHADOW_HIT_TOL itself is declared in Terrain.inc (included earlier):
+// MarchTerrain needs it before Lighting.inc is expanded, and GLSL requires
+// the declaration before its first use.
 
 // The hard-shadow pass for the sun: ONE ray from the hit point toward the
 // sun, traced through the full scene flow (TraceSheetRay). Because the

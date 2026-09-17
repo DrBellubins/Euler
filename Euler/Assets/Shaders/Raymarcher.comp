@@ -193,10 +193,12 @@ bool IntersectScene(Ray ray, int universe,
 // only (no uv / family / normal latching - a shadow ray needs to know IF
 // something occludes the light, not what it hit). The terrain's sub-surface
 // early-out is relaxed for these rays (see MarchTerrain in Terrain.inc):
-// a shadow origin INSIDE the surface reports its own surface as a t~=0 hit,
-// and the lighting system's SHADOW_HIT_TOL folds that back into "lit" (the
-// standard acne guard). Everything else - the family race, the wormhole
-// flow, the step/bisection - is identical to the primary trace.
+// a crossing of the point's OWN local surface within SHADOW_HIT_TOL of the
+// origin (the acne case - on a slope steeper than the sun's elevation the
+// ray is inside the solid near the origin) is marched THROUGH, and the next
+// crossing - the real occluder - is what is reported. Everything else - the
+// family race, the wormhole flow, the step/bisection - is identical to the
+// primary trace.
 bool IntersectSceneShadow(Ray ray, int universe, out float t)
 {
     t = -1.0;

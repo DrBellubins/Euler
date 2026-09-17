@@ -178,6 +178,17 @@ vec3 TerrainNormal(vec2 worldXz, float dist)
 // Intersection: raymarch the heightfield
 // ---------------------------------------------------------------------------
 
+// A shadow hit closer than this total path length from the origin is the
+// point's OWN surface, not a separate occluder: the march folds a
+// sub-surface / self-slope origin (the acne case) into a crossing within
+// this tolerance - and then marches through the interior to the real
+// occluder (see MarchTerrain) - and grazing re-crossings of the same
+// surface do too. Lighting.inc compares the shadow hit distance against the
+// SAME constant and folds a hit below it into "lit". (Declared here, not in
+// Lighting.inc, because MarchTerrain uses it and GLSL requires the
+// declaration before the function body - Lighting.inc is included later.)
+const float SHADOW_HIT_TOL = 0.05;
+
 // The infinite heightfield march (shared by the primary and the shadow
 // rays). Returns distance t (or -1 on miss) and latches the hit's LOCAL xz
 // into *uv.
@@ -186,13 +197,22 @@ vec3 TerrainNormal(vec2 worldXz, float dist)
 // driver's fog (1 - exp(-0.010 * t), see ApplyFog) is ~1.0 beyond ~800
 // units, so a miss past the cap renders pure fog - the cap is invisible.
 //
-// `shadow` selects the shadow-ray variant: a shadow ray's normal-biased
+// `shadow` selects the shadow-ray variant. A shadow ray's normal-biased
 // origin can sit INSIDE the surface (a steep slope pulls it below), and the
-// sub-surface early-out must NOT fire there - the surface it sits in
-// occludes its own point only as ACNE, so the march folds it into a t~=0
-// hit (the bisection converges on the crossing at the origin) and the
-// lighting system's SHADOW_HIT_TOL folds THAT back into "lit". A primary
-// ray below the surface is a degenerate case (no interior) and stays a miss.
+// sub-surface early-out must NOT fire there. More to the point for terrain
+// SELF-shadowing: on a slope steeper than the sun's elevation the terrain
+// rises faster than the shadow ray, so the ray crosses its OWN local surface
+// within SHADOW_HIT_TOL of the origin and is INSIDE the solid - this is
+// exactly the case where the point SHOULD be shadowed (it looks up at the
+// peak that blocks the sun), so the march must NOT stop at that crossing.
+// It steps through the interior (fixed InteriorStep - d * Safety is
+// negative inside) until the ray exits the surface. The interior span IS the
+// occlusion: if it stretches beyond SHADOW_HIT_TOL from the origin, the ray
+// was inside the solid for the part of its path past the point (the peak
+// between it and the sun) and the point is shadowed; a span that ends
+// within the tolerance is genuine acne and the march just continues. A
+// primary ray below the surface is a degenerate case (no interior) and
+// stays a miss.
 float MarchTerrain(vec3 ro, vec3 rd, bool shadow, out vec2 uv)
 {
     uv = vec2(0.0);
@@ -223,13 +243,21 @@ float MarchTerrain(vec3 ro, vec3 rd, bool shadow, out vec2 uv)
     // a step that still overshoots a steep slope is recovered by the
     // bisection below (it only costs convergence speed, not correctness).
     const float Safety   = 0.75;
+    // Shadow only: the fixed step while the ray is inside the solid (d *
+    // Safety is negative there and would step backwards). Small enough to
+    // stay under the eps hit tolerance at the exit (no false "grazing" hit),
+    // large enough to bound the step count - the solid is at most the
+    // amplitude deep, and a shadow ray always has an upward component
+    // (ShadowPass skips ndl <= 0) so it exits.
+    const float InteriorStep = 0.5;
 
     // d is the height ABOVE the surface: positive when the sample point is
     // above the terrain (the normal state), ~0 at the surface, negative once
     // the march has overshot it. (h - p.y) would be negative in the normal
     // state - do not flip the sign when reading this loop.
-    float t     = 0.0;
-    float tPrev = 0.0;   // last distance known to be above the surface
+    float  t     = 0.0;
+    float  tPrev = 0.0;    // last distance known to be above the surface
+    bool   inside = false; // shadow only: the ray is inside the solid (see header)
     for (int i = 0; i < MaxSteps; i++)
     {
         vec3 p = ro + rd * t;
@@ -238,6 +266,31 @@ float MarchTerrain(vec3 ro, vec3 rd, bool shadow, out vec2 uv)
         float d = p.y - TerrainHeight(p.xz, t);   // height above the surface
         if (d < 0.0)
         {
+            if (inside)
+            {
+                // Still inside the solid: fixed step toward the exit (d *
+                // Safety is negative here and would step backwards). If the
+                // horizon runs out inside, the ray spent the whole march in
+                // the terrain - report the (large) t as an occluder, not a
+                // miss: the light path was blocked.
+                t += InteriorStep;
+                if (t >= MaxDist) return t;
+                continue;
+            }
+
+            // Above -> inside: a downward surface crossing at ~t.
+            if (shadow && t <= SHADOW_HIT_TOL)
+            {
+                // ACNE: the crossing is the point's OWN local surface within
+                // the tolerance (see the function header) - not an
+                // occluder. Enter the interior and keep marching; the NEXT
+                // crossing (after the ray exits) is the real one.
+                inside = true;
+                t += InteriorStep;
+                if (t >= MaxDist) return t;
+                continue;
+            }
+
             // Overshot the surface on a steep slope: the surface lies
             // between tPrev (above) and t (below). The heightfield is
             // continuous in t, so bisect to the crossing instead of
@@ -258,6 +311,18 @@ float MarchTerrain(vec3 ro, vec3 rd, bool shadow, out vec2 uv)
             uv = ph.xz - TerrainData[0].xz;
             return hi;
         }
+
+        // Above the surface: a shadow ray (re)entered open space here - the
+        // exit of the interior. If the interior span stretched beyond the
+        // acne tolerance, the ray was inside the solid for the part of its
+        // path past the origin (the peak the point looks up at) - the light
+        // path is blocked: occluded. A shallow span that ends within the
+        // tolerance is genuine acne - keep marching normally (this sample
+        // becomes the new "known above" (tPrev) for any later bisection).
+        if (inside && t > SHADOW_HIT_TOL)
+            return t;
+        inside = false;
+
         float eps = 0.02 + 0.005 * t;             // tight up close, loose far away
         if (d <= eps)
         {
@@ -278,7 +343,8 @@ float IntersectTerrain(vec3 ro, vec3 rd, out vec2 uv)
 }
 
 // Shadow-ray intersection (the driver's IntersectSceneShadow): hit distance
-// only - same march, relaxed sub-surface guard, the uv latch is unused.
+// only - same march, relaxed sub-surface guard, self-crossings are marched
+// through to the real occluder (see MarchTerrain), the uv latch is unused.
 float IntersectTerrainShadow(vec3 ro, vec3 rd)
 {
     vec2 uv;
