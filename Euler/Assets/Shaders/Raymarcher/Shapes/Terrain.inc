@@ -201,8 +201,7 @@ const float SHADOW_HIT_TOL = 0.05;
 // origin can sit INSIDE the surface (a steep slope pulls it below), and the
 // sub-surface early-out must NOT fire there. More to the point for terrain
 // SELF-shadowing: on a slope steeper than the sun's elevation the terrain
-// rises faster than the shadow ray, so the ray crosses (or merely RUNS
-// ALONG, so close that the eps hit test catches it) its OWN local surface
+// rises faster than the shadow ray, so the ray crosses its OWN local surface
 // within SHADOW_HIT_TOL of the origin and is INSIDE the solid - this is
 // exactly the case where the point SHOULD be shadowed (it looks up at the
 // peak that blocks the sun), so the march must NOT stop at that crossing.
@@ -211,11 +210,9 @@ const float SHADOW_HIT_TOL = 0.05;
 // occlusion: if it stretches beyond SHADOW_HIT_TOL from the origin, the ray
 // was inside the solid for the part of its path past the point (the peak
 // between it and the sun) and the point is shadowed; a span that ends
-// within the tolerance is genuine acne and the march just continues.
-// Separately, the step is capped at SHADOW_MAX_STEP so a ray high above the
-// terrain cannot JUMP OVER a distant peak (both of its surface crossings
-// landing between two samples) and miss its shadow. A primary ray below the
-// surface is a degenerate case (no interior) and stays a miss.
+// within the tolerance is genuine acne and the march just continues. A
+// primary ray below the surface is a degenerate case (no interior) and
+// stays a miss.
 float MarchTerrain(vec3 ro, vec3 rd, bool shadow, out vec2 uv)
 {
     uv = vec2(0.0);
@@ -253,17 +250,6 @@ float MarchTerrain(vec3 ro, vec3 rd, bool shadow, out vec2 uv)
     // amplitude deep, and a shadow ray always has an upward component
     // (ShadowPass skips ndl <= 0) so it exits.
     const float InteriorStep = 0.5;
-    // Shadow only: the max step (the jump-over guard). d * Safety is only
-    // safe while the sample is approaching THE surface it measures: a shadow
-    // ray high above the terrain (crossing the gap between two peaks) can
-    // step PAST a distant peak - landing beyond both of its surface
-    // crossings - so the ray never samples the solid and the peak's shadow
-    // is missed (the bisection only recovers a crossing the sample landed
-    // INSIDE). Capping the step bounds the jump, so a peak wider than the
-    // cap cannot be skipped (the march lands inside its solid between the
-    // crossings). Cost: long high marches take more steps; MaxDist bounds
-    // them (and the fog hides the far ones).
-    const float SHADOW_MAX_STEP = 4.0;
 
     // d is the height ABOVE the surface: positive when the sample point is
     // above the terrain (the normal state), ~0 at the surface, negative once
@@ -292,11 +278,23 @@ float MarchTerrain(vec3 ro, vec3 rd, bool shadow, out vec2 uv)
                 continue;
             }
 
-            // Above -> inside: a downward surface crossing between tPrev
-            // (above) and t (below). Bisect to the actual ROOT first - a
-            // coarse sample can land well past a shallow crossing, and the
-            // acne decision below must be made on the root, not the sample.
-            // The heightfield is continuous in t, so bisection is exact.
+            // Above -> inside: a downward surface crossing at ~t.
+            if (shadow && t <= SHADOW_HIT_TOL)
+            {
+                // ACNE: the crossing is the point's OWN local surface within
+                // the tolerance (see the function header) - not an
+                // occluder. Enter the interior and keep marching; the NEXT
+                // crossing (after the ray exits) is the real one.
+                inside = true;
+                t += InteriorStep;
+                if (t >= MaxDist) return t;
+                continue;
+            }
+
+            // Overshot the surface on a steep slope: the surface lies
+            // between tPrev (above) and t (below). The heightfield is
+            // continuous in t, so bisect to the crossing instead of
+            // reporting a miss (misses would show as sky holes).
             // 8 iterations refine the overshoot well below the eps hit
             // tolerance (0.02 + 0.005*t) at every range, so the landing
             // point stays consistent with the hit test - while the old 16
@@ -309,20 +307,6 @@ float MarchTerrain(vec3 ro, vec3 rd, bool shadow, out vec2 uv)
                 vec3 pm = ro + rd * mid;
                 if (pm.y - TerrainHeight(pm.xz, mid) > 0.0) lo = mid; else hi = mid;
             }
-
-            if (shadow && hi <= SHADOW_HIT_TOL)
-            {
-                // ACNE: the crossing is the point's OWN local surface within
-                // the tolerance (see the function header) - not an
-                // occluder. Enter the interior at the crossing and keep
-                // marching; the interior span decides (see the exit check
-                // below).
-                inside = true;
-                t = hi + InteriorStep;
-                if (t >= MaxDist) return t;
-                continue;
-            }
-
             vec3 ph = ro + rd * hi;
             uv = ph.xz - TerrainData[0].xz;
             return hi;
@@ -342,27 +326,11 @@ float MarchTerrain(vec3 ro, vec3 rd, bool shadow, out vec2 uv)
         float eps = 0.02 + 0.005 * t;             // tight up close, loose far away
         if (d <= eps)
         {
-            if (shadow && t <= SHADOW_HIT_TOL)
-            {
-                // ACNE: a "hit" this close to the origin is the point's own
-                // local surface - at a low sun the shadow ray runs ALONG the
-                // slope (the slope is steeper than the sun's elevation), so
-                // d shrinks toward 0 without the ray ever crossing it, and
-                // this tolerance would fold its own surface into a t~=0
-                // "hit". Not an occluder: keep marching, at least out of the
-                // tolerance window - the crossing is then decided from the
-                // actual root (the d < 0 branch above) and the interior span.
-                t += max(d * Safety, SHADOW_HIT_TOL - t);
-                continue;
-            }
             uv = p.xz - TerrainData[0].xz;
             return (t > 0.0) ? t : 1e-3;          // the driver treats t=0 as a miss
         }
         tPrev = t;
-        if (shadow)
-            t += min(d * Safety, SHADOW_MAX_STEP); // jump-over guard (see constant)
-        else
-            t += d * Safety;
+        t += d * Safety;
         if (t >= MaxDist) return -1.0;            // beyond the (fog-hidden) horizon
     }
     return -1.0;
