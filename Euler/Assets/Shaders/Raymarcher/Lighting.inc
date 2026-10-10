@@ -109,7 +109,7 @@ float ShadowPass(vec3 pos, vec3 nrm, int universe)
                           uv, t, family, nrm2, hitPos, endUniverse, skyDir))
             return (t >= SHADOW_HIT_TOL) ? 0.0 : 1.0;
     }
-    else if (IntersectSceneShadow(Ray(ro, toSun), universe, t))
+    else if (IntersectSceneShadow(Ray(ro, toSun), universe, -1.0, t))
         return (t >= SHADOW_HIT_TOL) ? 0.0 : 1.0;
 
     return 1.0;

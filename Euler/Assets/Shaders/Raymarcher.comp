@@ -133,18 +133,30 @@ Ray MakePixelRay(vec2 pixel)
 // and the winner's family ID (Family<Name>, declared in each shape's .inc)
 // latched.
 //
+// maxT bounds the search (a hit beyond it is not reported; -1 = no bound).
+// The wormhole's analytic PRE-TEST passes the distance to the mouth ball:
+// anything behind the mouth is decided by the 4D path, so bounding the search
+// there skips a full-horizon terrain march whose result would be thrown away.
+//
 // Each family block must follow the plane pattern below: an
-// Intersect<Family>() that returns -1 on miss and only latches its uv AND
-// normal when t improves (a farther hit later in the block must never
-// clobber the closest hit's uv or normal). The normal is computed only in
-// the block that actually WINS the race so far (terrain's finite-difference
-// normal is the expensive one) - it feeds the display stage's edge-aware
-// upscaler, which needs one consistent normal per winning ray.
+// Intersect<Family>() that returns -1 on miss and only latches its uv when t
+// improves (a farther hit later in the block must never clobber the closest
+// hit's uv).
+//
+// NORMALS: the cheap analytic ones (the planes') are latched here; the
+// TERRAIN's finite-difference normal is NOT. It costs four full-octave FBM
+// evaluations and this function runs TWICE for a ray aimed at the mouth (the
+// analytic pre-test, then the handoff from the exit sheet), so computing it
+// here pays it for hits that lose the race or get discarded outright. main()
+// computes it once, for the family that actually won, from the uv/t returned
+// here. Keep that contract when adding a family with an expensive normal -
+// it feeds the display stage's edge-aware upscaler, which needs one
+// consistent normal per winning ray.
 // *universe is the side of the wormhole the ray is travelling on (+1 upper,
 // -1 lower): the terrain exists in BOTH universes (same heightfield), the
 // flat planes exist only in the upper one, so the lower-universe pass skips
 // the plane family.
-bool IntersectScene(Ray ray, int universe,
+bool IntersectScene(Ray ray, int universe, float maxT,
                     out vec2 uv, out float t, out int family, out vec3 nrm, out vec3 pos)
 {
     t      = -1.0;
@@ -161,7 +173,7 @@ bool IntersectScene(Ray ray, int universe,
             if (i >= PlaneCount) break;
             vec2 candUv;
             float th = IntersectPlane(ray.Origin, ray.Dir, i, candUv);
-            if (th > 0.0 && (t < 0.0 || th < t))
+            if (th > 0.0 && (maxT < 0.0 || th <= maxT) && (t < 0.0 || th < t))
             {
                 t = th; uv = candUv; family = FamilyPlane;
                 nrm = normalize(PlaneData[i * 3 + 1].xyz);
@@ -174,14 +186,12 @@ bool IntersectScene(Ray ray, int universe,
     if (TerrainEnabled > 0)
     {
         vec2 candUv;
-        float th = IntersectTerrain(ray.Origin, ray.Dir, candUv);
+        float th = IntersectTerrain(ray.Origin, ray.Dir, candUv, maxT);
         if (th > 0.0 && (t < 0.0 || th < t))
         {
             t = th; uv = candUv; family = FamilyTerrain;
-            // Finite-difference normal at the hit (world xz; the LOD octave
-            // falloff uses the path length th, exactly as ShadeTerrain did
-            // before the normal moved here).
-            nrm = TerrainNormal(candUv + TerrainData[0].xz, th);
+            // nrm deliberately NOT computed here (see the header): main()
+            // derives it from uv + t for the winning family only.
             pos = ray.Origin + ray.Dir * th;
         }
     }
@@ -199,7 +209,7 @@ bool IntersectScene(Ray ray, int universe,
 // crossing - the real occluder - is what is reported. Everything else - the
 // family race, the wormhole flow, the step/bisection - is identical to the
 // primary trace.
-bool IntersectSceneShadow(Ray ray, int universe, out float t)
+bool IntersectSceneShadow(Ray ray, int universe, float maxT, out float t)
 {
     t = -1.0;
 
@@ -210,13 +220,13 @@ bool IntersectSceneShadow(Ray ray, int universe, out float t)
             if (i >= PlaneCount) break;
             vec2 candUv;
             float th = IntersectPlane(ray.Origin, ray.Dir, i, candUv);
-            if (th > 0.0 && (t < 0.0 || th < t)) t = th;
+            if (th > 0.0 && (maxT < 0.0 || th <= maxT) && (t < 0.0 || th < t)) t = th;
         }
     }
 
     if (TerrainEnabled > 0)
     {
-        float th = IntersectTerrainShadow(ray.Origin, ray.Dir);
+        float th = IntersectTerrainShadow(ray.Origin, ray.Dir, maxT);
         if (th > 0.0 && (t < 0.0 || th < t)) t = th;
     }
 
@@ -226,6 +236,31 @@ bool IntersectSceneShadow(Ray ray, int universe, out float t)
 // ---------------------------------------------------------------------------
 // Wormhole: 4D throat march (the driver's non-Euclidean flow)
 // ---------------------------------------------------------------------------
+
+// Per-ray throat-march budget (the divergence fix).
+//
+// A GPU runs a warp in lockstep: a workgroup costs what its SLOWEST lane
+// costs. With a single global step cap (WH_MAX_STEPS), every workgroup that
+// contains one grazing or looping ray pays the full cap - so inside the mouth
+// the frame rate tracked the WORST pixel rather than the average one. Giving
+// each ray a bound derived from the geometry it can actually travel removes
+// that tail: a pixel whose ray only clips the edge of the mouth ball stops
+// after a few steps instead of dragging its neighbours to 384.
+//
+// The bound is the straight 3D CHORD the ray cuts through the mouth ball,
+// times WH_PATH_SLACK: a ray on the throat curves, so its 4D path is longer
+// than the chord (a full loop of the torus is pi * rMaj against a 2 * rMaj
+// chord, hence the slack). A ray that still exhausts its own budget falls
+// back to the exact 3D path below, exactly as with the global cap.
+int WhThroatBudget(vec4 ro4, vec4 rd4, float stepFloor)
+{
+    float rMaj2 = WhRmaj() * WhRmaj();
+    float b     = dot(ro4.xyz, rd4.xyz);
+    float perp2 = dot(ro4.xyz, ro4.xyz) - b * b;   // miss distance from the axis
+    float chord = 2.0 * sqrt(max(rMaj2 - perp2, 0.0));
+    int   budget = 16 + int(chord * 3.5 / stepFloor);
+    return min(budget, WH_MAX_STEPS);
+}
 
 // Marches a 4D ray along the wormhole hypersurface (Wormhole.inc owns the
 // space geometry). See that file for the key property that makes this loop
@@ -248,6 +283,15 @@ bool WhMarch(vec4 ro4, vec4 rd4, bool shadow,
     float pathLen = 0.0;
     float rMaj2   = WhRmaj() * WhRmaj();
 
+    // Primary rays march at the fine floor (that is what keeps the rim
+    // handoff direction stable); shadow rays answer a binary occlusion
+    // question, so they march coarsely with a small budget - see
+    // WH_SHADOW_STEP / WH_SHADOW_MAX_STEPS in Wormhole.inc. With hard
+    // shadows on, EVERY lit pixel traces a second throat march, so this is
+    // most of the cost of the mouth view.
+    float stepFloor = (shadow ? WH_SHADOW_STEP : WH_STEP_FINE) * WhRmin();
+    int   maxSteps  = shadow ? WH_SHADOW_MAX_STEPS : WhThroatBudget(ro4, rd4, stepFloor);
+
     // The curved region is the mouth ball (|xyz| < rMaj). A sheet camera
     // starts OUTSIDE it: the first (large, flat-sheet) steps approach the
     // mouth, and the march may only hand off to the exact 3D path once the
@@ -256,9 +300,9 @@ bool WhMarch(vec4 ro4, vec4 rd4, bool shadow,
     bool inBall = dot(ro4.xyz, ro4.xyz) < rMaj2;
     pos = WhCenter() + ro4.xyz;
 
-    for (int i = 0; i < WH_MAX_STEPS; i++)
+    for (int i = 0; i < maxSteps; i++)
     {
-        float d = SpaceStepLimit(p4);
+        float d = SpaceStepLimit(p4, stepFloor);
         p4 += d4 * d;
         pathLen += d;
         SpaceNormalize(p4, d4);   // the non-Euclidean step: re-project onto space
@@ -276,7 +320,7 @@ bool WhMarch(vec4 ro4, vec4 rd4, bool shadow,
             if (shadow)
             {
                 float th;
-                if (IntersectSceneShadow(Ray(pos3, dir3), universe, th))
+                if (IntersectSceneShadow(Ray(pos3, dir3), universe, -1.0, th))
                 {
                     t = pathLen + th; pos = pos3 + dir3 * th;
                     return true;
@@ -287,7 +331,7 @@ bool WhMarch(vec4 ro4, vec4 rd4, bool shadow,
             float th;
             int   tf;
             vec3  tn, tp;
-            if (IntersectScene(Ray(pos3, dir3), universe, tu, th, tf, tn, tp))
+            if (IntersectScene(Ray(pos3, dir3), universe, -1.0, tu, th, tf, tn, tp))
             {
                 uv = tu; t = pathLen + th; family = tf; nrm = tn; pos = tp;
                 return true;
@@ -310,7 +354,7 @@ bool WhMarch(vec4 ro4, vec4 rd4, bool shadow,
         if (shadow)
         {
             float th;
-            if (IntersectSceneShadow(Ray(pos3, dir3), universe, th))
+            if (IntersectSceneShadow(Ray(pos3, dir3), universe, -1.0, th))
             {
                 t = pathLen + th; pos = pos3 + dir3 * th;
                 return true;
@@ -321,7 +365,7 @@ bool WhMarch(vec4 ro4, vec4 rd4, bool shadow,
         float th;
         int   tf;
         vec3  tn, tp;
-        if (IntersectScene(Ray(pos3, dir3), universe, tu, th, tf, tn, tp))
+        if (IntersectScene(Ray(pos3, dir3), universe, -1.0, tu, th, tf, tn, tp))
         {
             uv = tu; t = pathLen + th; family = tf; nrm = tn; pos = tp;
             return true;
@@ -397,9 +441,9 @@ bool TraceSheetRay(vec4 ro4, vec4 rd4, bool shadow, int universe,
                 if (shadow)
                 {
                     float th;
-                    return IntersectSceneShadow(Ray(ro3, rd3), universe, th);
+                    return IntersectSceneShadow(Ray(ro3, rd3), universe, -1.0, th);
                 }
-                return IntersectScene(Ray(ro3, rd3), universe, uv, t, family, nrm, pos);
+                return IntersectScene(Ray(ro3, rd3), universe, -1.0, uv, t, family, nrm, pos);
             }
 
             // Pre-test: an object in front of the mouth is hit BEFORE the
@@ -407,11 +451,14 @@ bool TraceSheetRay(vec4 ro4, vec4 rd4, bool shadow, int universe,
             // that, so take the exact 3D hit and skip the march. A 3D hit
             // inside/behind the ball is meaningless (the 4D path decides) -
             // the march takes over and its handoff re-runs the exact path
-            // from the exit sheet.
+            // from the exit sheet. The search is BOUNDED by tEnter: a hit
+            // beyond the mouth is discarded here anyway, so marching to the
+            // full horizon for it is pure waste (this was the second terrain
+            // march every mouth-aimed ray paid for nothing).
             if (shadow)
             {
                 float th;
-                if (IntersectSceneShadow(Ray(ro3, rd3), universe, th) && th < tEnter)
+                if (IntersectSceneShadow(Ray(ro3, rd3), universe, tEnter, th) && th < tEnter)
                 {
                     t = th; pos = ro3 + rd3 * th;
                     return true;
@@ -423,7 +470,7 @@ bool TraceSheetRay(vec4 ro4, vec4 rd4, bool shadow, int universe,
             float pt;
             int   pf;
             vec3  pn, pp;
-            if (IntersectScene(Ray(ro3, rd3), universe, puv, pt, pf, pn, pp) && pt < tEnter)
+            if (IntersectScene(Ray(ro3, rd3), universe, tEnter, puv, pt, pf, pn, pp) && pt < tEnter)
             {
                 uv = puv; t = pt; family = pf; nrm = pn; pos = pp;
                 return true;
@@ -526,8 +573,19 @@ void main()
     {
         Ray ray = MakePixelRay(vec2(pix));
         skyDir = ray.Dir;
-        hit = IntersectScene(ray, universe, uv, t, family, nrm, hitPos);
+        hit = IntersectScene(ray, universe, -1.0, uv, t, family, nrm, hitPos);
     }
+
+    // The terrain's finite-difference normal is the only expensive normal in
+    // the scene, so IntersectScene does NOT compute it: it is derived here,
+    // once, for the family that actually won the race (a ray aimed at the
+    // mouth traces the scene twice - the analytic pre-test and the throat
+    // handoff - and paying four full-octave FBM evaluations for the
+    // discarded hit is what this avoids). `t` is the TOTAL path length, which
+    // is also the right distance for the octave LOD: for a wormhole-mediated
+    // hit the surface sits on the far sheet, measured along the bent path.
+    if (hit && family == FamilyTerrain && TerrainEnabled > 0)
+        nrm = TerrainNormal(uv + TerrainData[0].xz, t);
 
     vec3 color;
     if (hit)

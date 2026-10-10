@@ -129,6 +129,15 @@ public class Raymarcher
     /// </summary>
     private const int TerrainTexUnit = 1;
 
+    /// <summary>
+    /// Texture unit the compute stage samples the baked terrain noise lattice
+    /// from (see <see cref="TextureGen.NoiseLattice"/> and Hash21 in
+    /// Raymarcher/Shapes/Terrain.inc). It is an internal asset of the terrain
+    /// family - generated here, never supplied by the scene - and it is bound
+    /// under the same pre-dispatch rule as the other two.
+    /// </summary>
+    private const int NoiseLatticeUnit = 2;
+
     /// <summary>SSBO binding point shared by the compute and display stages.</summary>
     private const uint OutputBufferBinding = 0;
 
@@ -136,6 +145,7 @@ public class Raymarcher
     private readonly Shader _displayShader;
     private readonly Texture2D _planeTex;
     private readonly Texture2D _terrainTex;
+    private readonly Texture2D _noiseLatticeTex;   // baked Hash21 table (terrain family internal)
     private readonly Texture2D _quadTex;   // 1x1 white, only exists to fill the screen
     private readonly PlanePrimitive[] _planes = new PlanePrimitive[MaxPlanes];
     private readonly float[] _planeData = new float[MaxPlanes * 12];
@@ -167,6 +177,7 @@ public class Raymarcher
     private int _locTerrainEnabled;
     private int _locTerrainData;
     private int _locTerrainTex;
+    private int _locNoiseLattice;
     private int _locWormholeEnabled;
     private int _locWormholeData;
     private int _locWormholeCam;
@@ -189,6 +200,11 @@ public class Raymarcher
         _planeTex = planeTexture;
         _terrainTex = terrainTexture;
 
+        // The terrain's noise lattice is baked once here (not per frame): the
+        // FBM's four hashes per octave become four cached texel fetches, and
+        // the noise field itself is unchanged.
+        _noiseLatticeTex = TextureGen.NoiseLattice();
+
         // Both stages go through Resource, so the #include pre-processor runs
         // on the compute source too (before it reaches the GL compiler).
         _computeShader = Resource.LoadShader(ComputeShaderPath, ShaderType.Compute);
@@ -203,6 +219,7 @@ public class Raymarcher
         _locTerrainEnabled = Raylib.GetShaderLocation(_computeShader, "TerrainEnabled");
         _locTerrainData    = Raylib.GetShaderLocation(_computeShader, "TerrainData");
         _locTerrainTex     = Raylib.GetShaderLocation(_computeShader, "TerrainTex");
+        _locNoiseLattice   = Raylib.GetShaderLocation(_computeShader, "NoiseLattice");
         _locWormholeEnabled = Raylib.GetShaderLocation(_computeShader, "WormholeEnabled");
         _locWormholeData    = Raylib.GetShaderLocation(_computeShader, "WormholeData");
         _locWormholeCam     = Raylib.GetShaderLocation(_computeShader, "WormholeCam");
@@ -331,6 +348,10 @@ public class Raymarcher
         Rlgl.ActiveTextureSlot(TerrainTexUnit);
         Rlgl.EnableTexture(_terrainTex.Id);
 
+        // ...and the baked noise lattice it samples lives on unit 2.
+        Rlgl.ActiveTextureSlot(NoiseLatticeUnit);
+        Rlgl.EnableTexture(_noiseLatticeTex.Id);
+
         // SetShaderValue* enables the compute program before uploading (the
         // uniform state lives on the program), so the plain high-level API
         // works for compute shaders too.
@@ -351,6 +372,7 @@ public class Raymarcher
         if (_hasTerrain)
             Raylib.SetShaderValueV(_computeShader, _locTerrainData, _terrainData, ShaderUniformDataType.Vec4, 3);
         Raylib.SetShaderValue(_computeShader, _locTerrainTex, TerrainTexUnit, ShaderUniformDataType.Int);
+        Raylib.SetShaderValue(_computeShader, _locNoiseLattice, NoiseLatticeUnit, ShaderUniformDataType.Int);
 
         Raylib.SetShaderValue(_computeShader, _locWormholeEnabled, _hasWormhole ? 1 : 0, ShaderUniformDataType.Int);
         if (_hasWormhole)
@@ -414,6 +436,7 @@ public class Raymarcher
         }
         Raylib.UnloadTexture(_planeTex);
         Raylib.UnloadTexture(_terrainTex);
+        Raylib.UnloadTexture(_noiseLatticeTex);
         Raylib.UnloadTexture(_quadTex);
     }
 

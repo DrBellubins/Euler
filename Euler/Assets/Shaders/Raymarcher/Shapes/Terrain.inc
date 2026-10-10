@@ -47,6 +47,11 @@ uniform vec4  TerrainData[3];
 // must not be used for the compute stage).
 uniform sampler2D TerrainTex;
 
+// The baked value-noise lattice (see the Hash21 note below). Bound to unit 2
+// by the C# side (Utils/TextureGen.NoiseLattice generates it, Raymarcher
+// binds it before the dispatch).
+uniform sampler2D NoiseLattice;
+
 #define MAX_TERRAIN_OCTAVES 6
 
 // Per-octave rotation: keeps the stacked noise layers from aligning with the
@@ -54,14 +59,52 @@ uniform sampler2D TerrainTex;
 const mat2 TerrainRot = mat2(0.80, 0.60, -0.60, 0.80);
 
 // ---------------------------------------------------------------------------
-// FBM noise (value noise, no external dependencies)
+// FBM noise (value noise; the lattice hash is baked into a texture)
 // ---------------------------------------------------------------------------
+
+// The per-step cost of the terrain march is dominated by the noise: every
+// TerrainHeight() is `octaves` ValueNoise() calls, each of which evaluates
+// four Hash21() hashes (~10 ALU ops each, two of them fracts). The hashes
+// are a pure function of the INTEGER lattice point, so they are baked once at
+// startup into a 256x256 RGBA8 table (Utils/TextureGen.NoiseLattice) and read
+// back here as a texel fetch: the FBM's ALU work collapses to 4 cached
+// fetches per octave, and the fetches use texture ports that are otherwise
+// idle.
+//
+// This is NOT an approximation of the noise: the table holds the exact
+// Hash21() values (16-bit fixed point across R+G, error ~1.5e-5 - about
+// 0.001 world units of height at the scene's amplitude), the lattice is
+// sampled with NEAREST at integer coordinates, and the quintic interpolation,
+// the octave stacking and the hill shaping are unchanged. The field is the
+// same one.
+//
+// TILING: the table wraps, so each octave is periodic with period
+// 256 lattice cells in its OWN (rotated, scaled) frame. At the scene's
+// frequency (0.04) the base octave repeats every ~6400 world units and the
+// finest every ~380 - both far beyond the fog horizon, so the repetition is
+// never visible. If a scene uses a much higher Frequency, raise the table
+// size in TextureGen.NoiseLattice AND NOISE_LATTICE_SIZE below together.
+//
+// Set TERRAIN_BAKED_NOISE to 0 to A/B the analytic hash (identical field,
+// more ALU).
+#define TERRAIN_BAKED_NOISE 1
+const float NOISE_LATTICE_SIZE = 256.0;   // MUST match TextureGen.NoiseLattice
 
 float Hash21(vec2 p)
 {
+#if TERRAIN_BAKED_NOISE
+    // ValueNoise() only ever calls this with integer lattice coordinates; the
+    // floor keeps the signature identical to the analytic form below, and
+    // mod() makes the lookup independent of the texture's wrap state.
+    vec2 cell = floor(p);
+    vec2 uv   = (mod(cell, NOISE_LATTICE_SIZE) + 0.5) / NOISE_LATTICE_SIZE;
+    vec2 c    = texture(NoiseLattice, uv).rg;   // UNORM8: value/255 per byte
+    return (c.x * 256.0 + c.y) / 257.0;         // 16-bit reconstruction
+#else
     p = fract(p * vec2(123.34, 456.21));
     p += dot(p, p + 45.32);
     return fract(p.x * p.y);
+#endif
 }
 
 float ValueNoise(vec2 p)
@@ -189,9 +232,23 @@ vec3 TerrainNormal(vec2 worldXz, float dist)
 // declaration before the function body - Lighting.inc is included later.)
 const float SHADOW_HIT_TOL = 0.05;
 
+// The march's horizon. The driver's fog (1 - exp(-0.010 * t), see ApplyFog)
+// is 0.99 dense by ~500 units, so a surface beyond that renders as fog
+// whichever colour it is: the old 1000-unit horizon paid up to twice as many
+// march steps for pixels that are fogged out anyway. Raising it only moves
+// the (invisible) boundary; lowering it below ~300 starts cutting into
+// visible terrain.
+const float TERRAIN_MAX_DIST = 500.0;
+
 // The infinite heightfield march (shared by the primary and the shadow
 // rays). Returns distance t (or -1 on miss) and latches the hit's LOCAL xz
 // into *uv.
+//
+// maxT bounds the search: a hit farther than maxT is reported as a miss.
+// Pass -1 for the full horizon. The driver uses this for the wormhole's
+// analytic PRE-TEST (maxT = the distance to the mouth ball): a hit behind
+// the mouth is discarded there - the 4D path decides what the ray sees - so
+// marching to the full horizon for it is pure waste.
 //
 // The plane family is analytic-infinite; a march needs a horizon. The
 // driver's fog (1 - exp(-0.010 * t), see ApplyFog) is ~1.0 beyond ~800
@@ -213,7 +270,7 @@ const float SHADOW_HIT_TOL = 0.05;
 // within the tolerance is genuine acne and the march just continues. A
 // primary ray below the surface is a degenerate case (no interior) and
 // stays a miss.
-float MarchTerrain(vec3 ro, vec3 rd, bool shadow, out vec2 uv)
+float MarchTerrain(vec3 ro, vec3 rd, bool shadow, out vec2 uv, float maxT)
 {
     uv = vec2(0.0);
 
@@ -237,8 +294,8 @@ float MarchTerrain(vec3 ro, vec3 rd, bool shadow, out vec2 uv)
     // see the function header.)
     if (!shadow && TerrainHeight(ro.xz, 0.0) >= ro.y) return -1.0;   // dist 0 -> full octaves
 
-    const float MaxDist  = 1000.0;
-    const int   MaxSteps = 128;
+    const float MaxSteps = 128;
+    float maxDist = (maxT > 0.0) ? min(TERRAIN_MAX_DIST, maxT) : TERRAIN_MAX_DIST;
     // Safety shortens the step so most rays land on the surface directly;
     // a step that still overshoots a steep slope is recovered by the
     // bisection below (it only costs convergence speed, not correctness).
@@ -274,7 +331,7 @@ float MarchTerrain(vec3 ro, vec3 rd, bool shadow, out vec2 uv)
                 // the terrain - report the (large) t as an occluder, not a
                 // miss: the light path was blocked.
                 t += InteriorStep;
-                if (t >= MaxDist) return t;
+                if (t >= maxDist) return t;
                 continue;
             }
 
@@ -287,7 +344,7 @@ float MarchTerrain(vec3 ro, vec3 rd, bool shadow, out vec2 uv)
                 // crossing (after the ray exits) is the real one.
                 inside = true;
                 t += InteriorStep;
-                if (t >= MaxDist) return t;
+                if (t >= maxDist) return t;
                 continue;
             }
 
@@ -331,7 +388,7 @@ float MarchTerrain(vec3 ro, vec3 rd, bool shadow, out vec2 uv)
         }
         tPrev = t;
         t += d * Safety;
-        if (t >= MaxDist) return -1.0;            // beyond the (fog-hidden) horizon
+        if (t >= maxDist) return -1.0;           // beyond the (fog-hidden) horizon
     }
     return -1.0;
 }
@@ -339,7 +396,14 @@ float MarchTerrain(vec3 ro, vec3 rd, bool shadow, out vec2 uv)
 // Primary-ray intersection: full detail, sub-surface origins are a miss.
 float IntersectTerrain(vec3 ro, vec3 rd, out vec2 uv)
 {
-    return MarchTerrain(ro, rd, false, uv);
+    return MarchTerrain(ro, rd, false, uv, -1.0);
+}
+
+// Bounded variant (the driver's wormhole pre-test): only hits closer than
+// maxT are reported.
+float IntersectTerrain(vec3 ro, vec3 rd, out vec2 uv, float maxT)
+{
+    return MarchTerrain(ro, rd, false, uv, maxT);
 }
 
 // Shadow-ray intersection (the driver's IntersectSceneShadow): hit distance
@@ -348,7 +412,14 @@ float IntersectTerrain(vec3 ro, vec3 rd, out vec2 uv)
 float IntersectTerrainShadow(vec3 ro, vec3 rd)
 {
     vec2 uv;
-    return MarchTerrain(ro, rd, true, uv);
+    return MarchTerrain(ro, rd, true, uv, -1.0);
+}
+
+// Bounded shadow variant (the driver's wormhole pre-test for secondary rays).
+float IntersectTerrainShadow(vec3 ro, vec3 rd, float maxT)
+{
+    vec2 uv;
+    return MarchTerrain(ro, rd, true, uv, maxT);
 }
 
 // ---------------------------------------------------------------------------

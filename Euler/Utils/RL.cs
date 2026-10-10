@@ -26,7 +26,8 @@
 //                TextFindIndex, TextToInteger, TextToFloat, TextCopy,
 //                TextAppend, GetCodepointNext/Previous, GetKeyName
 //   Images     : LoadImageColors, LoadImagePalette, ExportImageToMemory,
-//                GetPixelColor, SetPixelColor, GenImageFontAtlas
+//                GetPixelColor, SetPixelColor, LoadTextureRgba8,
+//                GenImageFontAtlas
 //   Fonts      : LoadFontData (+ handle), UnloadFontData, ExportFontAsCode
 //   Audio      : LoadWaveSamples
 //   Models     : LoadMaterials
@@ -608,6 +609,32 @@ public static class RL
         fixed (byte* p = pixelData)
         {
             Raylib.SetPixelColor((void*)p, color, format);
+        }
+    }
+
+    /// <summary>
+    /// Uploads RAW RGBA8 pixels as a GPU texture, without the encode/decode
+    /// round trip through an image container (no PNG in the middle). The image
+    /// header is built over the caller's array for the duration of the call -
+    /// <c>fixed</c> pins it. The returned texture is a GPU object; release it
+    /// with <c>Raylib.UnloadTexture</c>.
+    /// </summary>
+    public static unsafe Texture2D LoadTextureRgba8(byte[] rgba, int width, int height)
+    {
+        if (rgba == null || width <= 0 || height <= 0 || rgba.Length < width * height * 4)
+            throw new ArgumentException("rgba must hold width*height*4 bytes.", nameof(rgba));
+
+        fixed (byte* p = rgba)
+        {
+            Image img = new Image
+            {
+                Width   = width,
+                Height  = height,
+                Mipmaps = 1,
+                Format  = PixelFormat.UncompressedR8G8B8A8,
+                Data    = p,
+            };
+            return Raylib.LoadTextureFromImage(img);
         }
     }
 
